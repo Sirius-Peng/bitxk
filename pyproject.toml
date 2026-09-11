@@ -22,6 +22,8 @@ classifiers = [
 dependencies = [
     "requests>=2.28",
     "pycryptodome>=3.18",
+    # 浏览器登录：用 CDP 驱动本机 Chromium 取登录态
+    "websockets>=12.0",
 ]
 
 [project.optional-dependencies]

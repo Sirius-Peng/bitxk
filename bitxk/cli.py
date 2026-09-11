@@ -173,6 +173,29 @@ def _add_common_options(parser: argparse.ArgumentParser, *, prefixed: bool = Fal
         default=None,
         help="学号。手动导入登录态（--token）时必填，因为批次接口形如 student/<学号>.do",
     )
+    parser.add_argument(
+        "--browser",
+        dest=dest("browser"),
+        nargs="?",
+        const="",
+        default=None,
+        metavar="路径",
+        help="用 Chromium 浏览器登录来获取登录态（推荐，不受 SSO 改版影响）；"
+        "可选用路径参数指定浏览器可执行文件",
+    )
+    parser.add_argument(
+        "--browser-timeout",
+        dest=dest("browser_timeout"),
+        type=float,
+        default=None,
+        help="等待浏览器登录的超时秒数（默认 300）",
+    )
+    parser.add_argument(
+        "--list-browsers",
+        dest=dest("list_browsers"),
+        action="store_true",
+        help="列出本机检测到的 Chromium 系浏览器后退出",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -186,8 +209,10 @@ def build_parser() -> argparse.ArgumentParser:
             "  bitxk check                    自检网络与页面结构\n"
             "  bitxk login                    测试登录\n"
             "  bitxk list                     看当前余量\n"
+            "  bitxk browser-login            用浏览器登录（推荐，不受 SSO 改版影响）\n"
             "  bitxk grab                     开始轮询抢课\n"
-            "  bitxk grab --interval 3 -v     指定间隔并输出调试日志\n"
+            "  bitxk gui                      打开图形界面\n"
+            "  bitxk grab --browser           抢课前先用浏览器登录\n"
         ),
     )
     parser.add_argument("-V", "--version", action="version", version=f"bitxk {__version__}")
@@ -217,6 +242,14 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         _add_common_options(sub.add_parser(name, help=help_text), prefixed=True)
 
+    sub.add_parser("gui", help="打开图形界面（推荐给不熟悉命令行的同学）")
+
+    browser = sub.add_parser(
+        "browser-login",
+        help="用 Chromium 浏览器登录一次并缓存登录态（推荐，不受 SSO 改版影响）",
+    )
+    _add_common_options(browser, prefixed=True)
+
     grab = sub.add_parser("grab", help="轮询并自动选课")
     _add_common_options(grab, prefixed=True)
     grab.add_argument("--once", action="store_true", help="只查一轮余量后退出（等同于 list）")
@@ -233,6 +266,9 @@ def _merge_common(args) -> None:
         "interval",
         "duration",
         "student_code",
+        "browser",
+        "browser_timeout",
+        "list_browsers",
     ):
         value = getattr(args, f"_{name}", None)
         if value not in (None, False):
@@ -296,6 +332,48 @@ def _build_auth(cfg: Config, http: HttpClient, args) -> BitAuth:
     return BitAuth(http, encrypt_mode=args.encrypt_mode or cfg.encrypt_mode)
 
 
+def browser_login_session(cfg: Config, args, *, on_progress=None) -> Session:
+    """用 Chromium 登录取登录态。
+
+    走这条路完全不需要账号密码：让用户在自己熟悉的浏览器里登录一次，
+    脚本只负责把 Cookie 与 Token 取出来。学校改版 SSO 也不受影响。
+
+    Args:
+        cfg: 配置（取学号、超时等）。
+        args: 命令行参数（``--browser`` 可指定浏览器路径）。
+        on_progress: 进度回调，供 GUI 复用。
+    """
+    from .auth import API_BASE, CAS_SERVICE_URL
+    from .browser import browser_login
+
+    browser_path = getattr(args, "browser", None) or None
+    timeout = getattr(args, "browser_timeout", None) or 300.0
+    progress = on_progress or (lambda msg: log(msg))
+
+    if browser_path:
+        log(f"使用指定的浏览器：{browser_path}")
+    else:
+        log("正在检测本机浏览器…")
+
+    result = browser_login(
+        api_base=API_BASE,
+        service_url=CAS_SERVICE_URL,
+        student_code=cfg.username,
+        browser_path=browser_path,
+        remember=True,
+        timeout=float(timeout),
+        on_progress=progress,
+    )
+    who = result.student_name or result.student_code or "（未知）"
+    log_ok(f"已从浏览器取得登录态：{who}")
+    if not result.session.student_code:
+        raise ConfigError(
+            "取到了登录态但拿不到学号。请用 --student-code 指定学号"
+            "（批次接口形如 student/<学号>.do）。"
+        )
+    return result.session
+
+
 def _manual_session(args, cfg: Config) -> Session | None:
     """如果用户给了 --token/--cookie，就构造手动会话。"""
     if not (args.token or args.cookie):
@@ -314,17 +392,32 @@ def _manual_session(args, cfg: Config) -> Session | None:
     return session
 
 
+def _use_browser_login(args) -> bool:
+    """是否走浏览器登录取登录态。"""
+    return getattr(args, "browser", None) is not None
+
+
 def _has_manual_session(args) -> bool:
-    """是否走手动导入登录态的路径。"""
-    return bool(getattr(args, "token", None) or getattr(args, "cookie", None))
+    """是否走手动导入登录态的路径（不需要账号密码）。"""
+    return bool(
+        getattr(args, "token", None) or getattr(args, "cookie", None) or _use_browser_login(args)
+    )
 
 
 def _connect(cfg: Config, args, *, need_login: bool = True) -> tuple[HttpClient, XkClient, Session]:
     """装配 HttpClient / XkClient / Session。"""
-    # 手动导入登录态时不需要账号密码，因此不校验 account 段
+    # 浏览器登录与手动导入都不需要账号密码，因此不校验 account 段
     manual = _manual_session(args, cfg)
-    cfg.validate(require_account=manual is None)
+    cfg.validate(require_account=manual is None and not _use_browser_login(args))
     http = _build_http(cfg)
+
+    if _use_browser_login(args):
+        session = browser_login_session(cfg, args)
+        session.save(cfg.base_dir / cfg.session_file)
+        http.cookies = session.cookies
+        http.set_token(session.token)
+        http.student_code = session.student_code
+        return http, XkClient(http), session
 
     if manual is not None:
         http.cookies = manual.cookies
@@ -468,6 +561,62 @@ def cmd_check(args) -> int:
     return 1
 
 
+def cmd_gui(args) -> int:
+    """启动图形界面。"""
+    from .gui import run_gui
+
+    log("正在启动图形界面…（关闭窗口即退出）")
+    return run_gui(args.config)
+
+
+def cmd_list_browsers(args) -> int:
+    """列出本机可用的 Chromium 系浏览器。"""
+    from .browser import default_profile_dir, detect_browsers
+
+    print(Style.bold("本机检测到的 Chromium 系浏览器"))
+    print()
+    browsers = detect_browsers(getattr(args, "browser", None) or None)
+    if not browsers:
+        log_err("没有找到任何 Chromium 系浏览器。")
+        print()
+        print("解决方式（任选其一）：")
+        print("  1. 安装 Google Chrome / Microsoft Edge / Chromium")
+        print("  2. 设置环境变量 BITXK_BROWSER 指向浏览器可执行文件")
+        print("  3. 用 --browser <路径> 手工指定")
+        return 1
+
+    for index, item in enumerate(browsers):
+        mark = Style.green("  ← 默认使用") if index == 0 else ""
+        print(f"  {index + 1}. {item.name}  {Style.dim('[' + item.source + ']')}{mark}")
+        print(f"     {Style.dim(str(item.path))}")
+    print()
+    print(f"浏览器登录会使用的 profile 目录：{Style.dim(str(default_profile_dir()))}")
+    print("（该目录用于记住登录态，删掉它即等于退出登录）")
+    return 0
+
+
+def cmd_browser_login(args) -> int:
+    """浏览器登录一次，把登录态存下来。"""
+    cfg = load_config(args.config)
+    cfg.validate(require_account=False)
+
+    http, client, session = _connect(cfg, args)
+    try:
+        log_ok("登录态已缓存，可以直接运行 bitxk grab 了。")
+        try:
+            info = client.student_info(session.student_code)
+            name = info.get("name") or session.student_name
+            log(f"  身份：{name}（{session.student_code}）")
+            for batch in client.batches(session.student_code):
+                marker = Style.green("  ← 当前可选") if batch.can_select else ""
+                log(f"  {batch}{marker}")
+        except BitxkError as exc:
+            log_warn(f"（无法读取批次信息：{exc}）")
+        return 0
+    finally:
+        http.close()
+
+
 def cmd_login(args) -> int:
     cfg = load_config(args.config)
     cfg.validate()
@@ -541,11 +690,19 @@ def cmd_grab(args) -> int:
         cfg.notify.stop_on_success = False
 
     manual = _manual_session(args, cfg)
-    cfg.validate(require_account=manual is None)
+    cfg.validate(require_account=manual is None and not _use_browser_login(args))
 
     http: HttpClient | None = None
     try:
-        if manual is not None:
+        if _use_browser_login(args):
+            http = _build_http(cfg)
+            session = browser_login_session(cfg, args)
+            session.save(cfg.base_dir / cfg.session_file)
+            http.cookies = session.cookies
+            http.set_token(session.token)
+            http.student_code = session.student_code
+            client = XkClient(http)
+        elif manual is not None:
             http = _build_http(cfg)
             http.cookies = manual.cookies
             http.set_token(manual.token)
@@ -743,6 +900,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     _setup_logging(args)
 
+    # --list-browsers 不依赖子命令，先处理掉
+    if getattr(args, "list_browsers", False):
+        return cmd_list_browsers(args)
+
     command = args.command
     if command is None:
         build_parser().print_help()
@@ -757,6 +918,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_login(args)
         if command == "list":
             return cmd_list(args)
+        if command == "browser-login":
+            return cmd_browser_login(args)
+        if command == "gui":
+            return cmd_gui(args)
         if command == "grab":
             if args.once:
                 return cmd_list(args)
