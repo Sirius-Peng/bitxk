@@ -1,0 +1,28 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- 敏感信息：绝对不要提交 ----
+config.toml
+.bitxk_session.json
+*.session.json
+cookies.txt
+courses.txt
+
+# ---- 运行产物 ----
+*.log
+bitxk.log
+
+# ---- 编辑器 / 系统 ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
