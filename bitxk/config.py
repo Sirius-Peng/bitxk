@@ -9,12 +9,18 @@ import os
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any
 
 from .client import CourseType
 from .exceptions import ConfigError
 
-__all__ = ["WatchTarget", "PollConfig", "Config", "load_config", "DEFAULT_CONFIG_NAME", "SAMPLE_CONFIG"]
+__all__ = [
+    "WatchTarget",
+    "PollConfig",
+    "Config",
+    "load_config",
+    "DEFAULT_CONFIG_NAME",
+    "SAMPLE_CONFIG",
+]
 
 DEFAULT_CONFIG_NAME = "config.toml"
 
@@ -97,6 +103,7 @@ enabled = true
 # 课程目标
 # --------------------------------------------------------------------------
 
+
 @dataclass
 class WatchTarget:
     """一门要盯的课程。"""
@@ -115,8 +122,7 @@ class WatchTarget:
         self.type = (self.type or CourseType.PUBLIC).strip().upper()
         if self.type not in CourseType.ALL:
             raise ConfigError(
-                f"课程「{self.name}」的 type={self.type} 非法，"
-                f"可选值：{', '.join(CourseType.ALL)}"
+                f"课程「{self.name}」的 type={self.type} 非法，可选值：{', '.join(CourseType.ALL)}"
             )
         # 允许 "老师A,老师B" 这种写法
         if isinstance(self.teachers, str):
@@ -151,6 +157,7 @@ class WatchTarget:
 # --------------------------------------------------------------------------
 # 轮询策略
 # --------------------------------------------------------------------------
+
 
 @dataclass
 class PollConfig:
@@ -237,6 +244,7 @@ class Config:
 # 加载
 # --------------------------------------------------------------------------
 
+
 def _section(data: dict, name: str) -> dict:
     value = data.get(name)
     return value if isinstance(value, dict) else {}
@@ -267,9 +275,7 @@ def load_config(path: str | Path | None = None) -> Config:
     if path is None:
         candidate = Path.cwd() / DEFAULT_CONFIG_NAME
         if not candidate.exists():
-            raise ConfigError(
-                f"找不到配置文件 {candidate}。请先运行 `bitxk init` 生成模板。"
-            )
+            raise ConfigError(f"找不到配置文件 {candidate}。请先运行 `bitxk init` 生成模板。")
         path = candidate
     path = Path(path).expanduser().resolve()
     if not path.exists():

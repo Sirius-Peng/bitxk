@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import random
 import threading
@@ -156,7 +157,7 @@ class HttpClient:
         if attempt >= self.max_retries:
             logger.debug("%s —— 已达最大重试次数", reason)
             return
-        delay = min(2 ** attempt + random.uniform(0, 0.5), 15.0)
+        delay = min(2**attempt + random.uniform(0, 0.5), 15.0)
         logger.debug("%s，%.1fs 后重试", reason, delay)
         time.sleep(delay)
 
@@ -170,12 +171,10 @@ class HttpClient:
         return False
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(Exception):  # 关闭失败无需上报
             self.session.close()
-        except Exception:  # pragma: no cover
-            pass
 
-    def __enter__(self) -> "HttpClient":
+    def __enter__(self) -> HttpClient:
         return self
 
     def __exit__(self, *exc_info: Any) -> None:

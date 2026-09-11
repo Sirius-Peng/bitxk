@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import re
 
 import pytest
 
@@ -32,8 +31,6 @@ class TestEncryptPassword:
         assert plain[:-pad].decode("utf-8") == "mypassword"
 
     def test_cbc_模式明文含随机前缀(self, aes_key):
-        from Crypto.Cipher import AES
-        from Crypto.Util.Padding import unpad
 
         ciphertext = encrypt_password("mypassword", aes_key, "cbc")
         raw = base64.b64decode(ciphertext)
@@ -108,8 +105,11 @@ class TestExtractErrorTip:
 class TestSession:
     def test_往返序列化(self, tmp_path):
         session = Session(
-            token="tok", cookies={"JSESSIONID": "abc"},
-            student_name="张三", student_code="1120200001", origin="sso",
+            token="tok",
+            cookies={"JSESSIONID": "abc"},
+            student_name="张三",
+            student_code="1120200001",
+            origin="sso",
         )
         path = tmp_path / "s.json"
         session.save(path)

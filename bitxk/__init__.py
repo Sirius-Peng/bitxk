@@ -50,19 +50,39 @@ from .poller import Poller, PollStats
 __all__ = [
     "__version__",
     # auth
-    "BitAuth", "Credentials", "Session", "encrypt_password", "API_BASE",
+    "BitAuth",
+    "Credentials",
+    "Session",
+    "encrypt_password",
+    "API_BASE",
     # client
-    "XkClient", "CourseType",
+    "XkClient",
+    "CourseType",
     # config
-    "Config", "PollConfig", "WatchTarget", "load_config",
+    "Config",
+    "PollConfig",
+    "WatchTarget",
+    "load_config",
     # http
     "HttpClient",
     # models
-    "Batch", "Course", "CourseStatus", "TeachingClass",
-    "SelectionOutcome", "SelectionResult",
+    "Batch",
+    "Course",
+    "CourseStatus",
+    "TeachingClass",
+    "SelectionOutcome",
+    "SelectionResult",
     # poller
-    "Poller", "PollStats",
+    "Poller",
+    "PollStats",
     # exceptions
-    "BitxkError", "ApiError", "CaptchaRequired", "ConfigError", "LoginError",
-    "NetworkError", "NotInBatchError", "RateLimited", "TokenExpired",
+    "BitxkError",
+    "ApiError",
+    "CaptchaRequired",
+    "ConfigError",
+    "LoginError",
+    "NetworkError",
+    "NotInBatchError",
+    "RateLimited",
+    "TokenExpired",
 ]

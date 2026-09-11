@@ -14,9 +14,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterator
+from typing import Any
 
 __all__ = [
     "CourseStatus",
@@ -73,11 +74,11 @@ def _as_bool(value: Any) -> bool:
 class CourseStatus(str, Enum):
     """教学班对当前用户的可选状态。"""
 
-    AVAILABLE = "available"      # 有余量，可以选
-    FULL = "full"                # 已满（需要轮询等待）
-    SELECTED = "selected"        # 已经选过
-    CONFLICT = "conflict"        # 与已选课程时间冲突
-    UNKNOWN = "unknown"          # 信息不足，无法判断
+    AVAILABLE = "available"  # 有余量，可以选
+    FULL = "full"  # 已满（需要轮询等待）
+    SELECTED = "selected"  # 已经选过
+    CONFLICT = "conflict"  # 与已选课程时间冲突
+    UNKNOWN = "unknown"  # 信息不足，无法判断
 
     @property
     def label(self) -> str:
@@ -127,25 +128,32 @@ class TeachingClass:
     # ---------------------------------------------------------------- 构造
 
     @classmethod
-    def from_api(cls, data: dict, *, course_name: str = "") -> "TeachingClass":
+    def from_api(cls, data: dict, *, course_name: str = "") -> TeachingClass:
         """从查询接口返回的一个教学班字典构造对象。"""
         if not isinstance(data, dict):
             raise TypeError("教学班数据必须是 dict")
 
         tc_id = _pick(
             data,
-            "teachingClassID", "teachingClassId", "teachingclassid",
-            "jxbid", "classId", "id",
+            "teachingClassID",
+            "teachingClassId",
+            "teachingclassid",
+            "jxbid",
+            "classId",
+            "id",
         )
         cls_name = _pick(data, "courseName", "kcmc", "course_name", default=course_name)
 
         obj = cls(
             teaching_class_id=str(tc_id) if tc_id is not None else "",
             course_name=str(cls_name or course_name or ""),
-            teacher=str(_pick(data, "teacherName", "teachers", "skjsxm", "teacher", default="") or ""),
+            teacher=str(
+                _pick(data, "teacherName", "teachers", "skjsxm", "teacher", default="") or ""
+            ),
             campus=str(_pick(data, "campusName", "campus", "xqmc", default="") or ""),
             time_place=str(
-                _pick(data, "timePlace", "sksjdd", "classTimePlace", "arrangeInfo", default="") or ""
+                _pick(data, "timePlace", "sksjdd", "classTimePlace", "arrangeInfo", default="")
+                or ""
             ),
             credits=str(_pick(data, "credits", "xf", default="") or ""),
             raw=dict(data),
@@ -156,22 +164,51 @@ class TeachingClass:
 
     def _infer_capacity(self) -> None:
         """多路推断容量信息。字段名不统一，所以按语义分组尝试。"""
-        remaining = _as_int(_pick(
-            self.raw,
-            "remainCapacity", "remainingCapacity", "remainNumber", "remainNum",
-            "surplusCapacity", "leftCapacity", "remaining", "remain",
-            "surplus", "left", "kyrs", "kyl",
-        ))
-        capacity = _as_int(_pick(
-            self.raw,
-            "capacity", "totalCapacity", "classCapacity", "limitCount",
-            "maxCount", "number", "rl", "zrs", "total", "limit",
-        ))
-        selected = _as_int(_pick(
-            self.raw,
-            "selectedCount", "selectedNumber", "selectedNum", "electiveNumber",
-            "chosenCount", "yxrs", "selected", "yxzrs",
-        ))
+        remaining = _as_int(
+            _pick(
+                self.raw,
+                "remainCapacity",
+                "remainingCapacity",
+                "remainNumber",
+                "remainNum",
+                "surplusCapacity",
+                "leftCapacity",
+                "remaining",
+                "remain",
+                "surplus",
+                "left",
+                "kyrs",
+                "kyl",
+            )
+        )
+        capacity = _as_int(
+            _pick(
+                self.raw,
+                "capacity",
+                "totalCapacity",
+                "classCapacity",
+                "limitCount",
+                "maxCount",
+                "number",
+                "rl",
+                "zrs",
+                "total",
+                "limit",
+            )
+        )
+        selected = _as_int(
+            _pick(
+                self.raw,
+                "selectedCount",
+                "selectedNumber",
+                "selectedNum",
+                "electiveNumber",
+                "chosenCount",
+                "yxrs",
+                "selected",
+                "yxzrs",
+            )
+        )
 
         if remaining is not None:
             self.remaining, self.capacity_source = remaining, "remaining"
@@ -204,9 +241,7 @@ class TeachingClass:
             self.status = CourseStatus.CONFLICT
             return
 
-        text = " ".join(
-            str(v) for v in self.raw.values() if isinstance(v, (str, int, float))
-        )
+        text = " ".join(str(v) for v in self.raw.values() if isinstance(v, (str, int, float)))
         if any(word in text for word in ("已选", "已选中", "已经选")):
             self.status = CourseStatus.SELECTED
             return
@@ -234,7 +269,11 @@ class TeachingClass:
             return "容量未知"
         if self.capacity is None:
             return f"余 {self.remaining}"
-        used = self.selected_count if self.selected_count is not None else self.capacity - self.remaining
+        used = (
+            self.selected_count
+            if self.selected_count is not None
+            else self.capacity - self.remaining
+        )
         return f"{used}/{self.capacity} (余 {self.remaining})"
 
     def __str__(self) -> str:
@@ -252,7 +291,7 @@ class Course:
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
-    def from_api(cls, data: dict, *, teaching_class_type: str = "") -> "Course":
+    def from_api(cls, data: dict, *, teaching_class_type: str = "") -> Course:
         """从查询接口返回的一门课构造对象（含 ``tcList`` 展开）。"""
         if not isinstance(data, dict):
             raise TypeError("课程数据必须是 dict")
@@ -266,14 +305,20 @@ class Course:
             for item in nested:
                 if isinstance(item, dict):
                     # 课程级字段补进教学班，避免教学班缺课程名/学分。
-                    merged = {k: v for k, v in data.items() if k not in ("tcList", "teachingClassList")}
+                    merged = {
+                        k: v for k, v in data.items() if k not in ("tcList", "teachingClassList")
+                    }
                     merged.update(item)
                     classes.append(TeachingClass.from_api(merged, course_name=name))
         elif _pick(data, "teachingClassID", "teachingClassId", "jxbid") is not None:
             classes.append(TeachingClass.from_api(data, course_name=name))
 
-        return cls(name=name, teaching_classes=classes,
-                   teaching_class_type=teaching_class_type, raw=dict(data))
+        return cls(
+            name=name,
+            teaching_classes=classes,
+            teaching_class_type=teaching_class_type,
+            raw=dict(data),
+        )
 
     def __iter__(self) -> Iterator[TeachingClass]:
         return iter(self.teaching_classes)
@@ -292,7 +337,7 @@ class Batch:
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
-    def from_api(cls, data: dict) -> "Batch":
+    def from_api(cls, data: dict) -> Batch:
         return cls(
             code=str(_pick(data, "code", "batchCode", "electiveBatchCode", default="") or ""),
             name=str(_pick(data, "name", "batchName", default="") or ""),
@@ -312,14 +357,14 @@ class Batch:
 class SelectionOutcome(str, Enum):
     """一次选课提交的结果分类。"""
 
-    SUCCESS = "success"          # 选上了
-    FULL = "full"                # 容量已满（继续轮询）
-    CONFLICT = "conflict"        # 时间冲突（轮询无意义）
-    ALREADY = "already"          # 已经选过
-    NOT_IN_BATCH = "not_batch"   # 不在可选批次 / 批次未开放
-    AUTH_ERROR = "auth_error"    # 登录态失效，需要重新登录
+    SUCCESS = "success"  # 选上了
+    FULL = "full"  # 容量已满（继续轮询）
+    CONFLICT = "conflict"  # 时间冲突（轮询无意义）
+    ALREADY = "already"  # 已经选过
+    NOT_IN_BATCH = "not_batch"  # 不在可选批次 / 批次未开放
+    AUTH_ERROR = "auth_error"  # 登录态失效，需要重新登录
     RATE_LIMITED = "rate_limited"  # 被限流
-    ERROR = "error"              # 其它错误
+    ERROR = "error"  # 其它错误
 
     @property
     def label(self) -> str:

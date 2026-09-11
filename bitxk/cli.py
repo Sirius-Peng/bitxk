@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import argparse
-import getpass
+import contextlib
 import logging
 import os
 import sys
@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import __version__
 from .auth import API_BASE, CAS_LOGIN_URL, BitAuth, Session
-from .client import CourseType, XkClient
+from .client import XkClient
 from .config import DEFAULT_CONFIG_NAME, SAMPLE_CONFIG, Config, load_config
 from .exceptions import (
     BitxkError,
@@ -115,6 +115,7 @@ def log_err(message: str) -> None:
 # 参数解析
 # --------------------------------------------------------------------------
 
+
 def _add_common_options(parser: argparse.ArgumentParser, *, prefixed: bool = False) -> None:
     """给子命令也挂上常用选项。
 
@@ -128,27 +129,42 @@ def _add_common_options(parser: argparse.ArgumentParser, *, prefixed: bool = Fal
     """
     dest = (lambda name: f"_{name}") if prefixed else (lambda name: name)
     parser.add_argument(
-        "--cookie", dest=dest("cookie"), default=None,
+        "--cookie",
+        dest=dest("cookie"),
+        default=None,
         help="手动导入浏览器 Cookie（自动登录失效时的兜底）",
     )
     parser.add_argument(
-        "--token", dest=dest("token"), default=None,
+        "--token",
+        dest=dest("token"),
+        default=None,
         help="手动导入选课系统 Token（或带 bitXsxkLogin= 的回跳 URL）",
     )
     parser.add_argument(
-        "--encrypt-mode", dest=dest("encrypt_mode"), choices=("ecb", "cbc"), default=None,
+        "--encrypt-mode",
+        dest=dest("encrypt_mode"),
+        choices=("ecb", "cbc"),
+        default=None,
         help="SSO 密码加密模式，默认 ecb；登录报错时可试 cbc",
     )
     parser.add_argument(
-        "--dry-run", dest=dest("dry_run"), action="store_true",
+        "--dry-run",
+        dest=dest("dry_run"),
+        action="store_true",
         help="只查询余量，绝不提交选课（安全试跑）",
     )
     parser.add_argument(
-        "--interval", dest=dest("interval"), type=float, default=None,
+        "--interval",
+        dest=dest("interval"),
+        type=float,
+        default=None,
         help="轮询间隔秒数（覆盖配置）",
     )
     parser.add_argument(
-        "--duration", dest=dest("duration"), type=float, default=None,
+        "--duration",
+        dest=dest("duration"),
+        type=float,
+        default=None,
         help="最长运行秒数，0 表示不限（覆盖配置）",
     )
 
@@ -170,22 +186,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-V", "--version", action="version", version=f"bitxk {__version__}")
     parser.add_argument(
-        "-c", "--config", default=None,
+        "-c",
+        "--config",
+        default=None,
         help=f"配置文件路径（默认 ./{DEFAULT_CONFIG_NAME}）",
     )
+    parser.add_argument("-u", "--username", default=None, help="学号（覆盖配置文件）")
     parser.add_argument(
-        "-u", "--username", default=None, help="学号（覆盖配置文件）"
-    )
-    parser.add_argument(
-        "-p", "--password", default=None,
+        "-p",
+        "--password",
+        default=None,
         help="密码（覆盖配置文件；建议改用环境变量 BITXK_PASSWORD，避免留在 shell 历史里）",
     )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="输出调试日志"
-    )
-    parser.add_argument(
-        "-q", "--quiet", action="store_true", help="只输出关键事件"
-    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
+    parser.add_argument("-q", "--quiet", action="store_true", help="只输出关键事件")
     _add_common_options(parser)
 
     sub = parser.add_subparsers(dest="command")
@@ -199,9 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     grab = sub.add_parser("grab", help="轮询并自动选课")
     _add_common_options(grab, prefixed=True)
-    grab.add_argument(
-        "--once", action="store_true", help="只查一轮余量后退出（等同于 list）"
-    )
+    grab.add_argument("--once", action="store_true", help="只查一轮余量后退出（等同于 list）")
     return parser
 
 
@@ -224,6 +236,7 @@ def parse_args(argv: list[str] | None = None):
 # --------------------------------------------------------------------------
 # 通用装配
 # --------------------------------------------------------------------------
+
 
 def _setup_logging(args) -> None:
     level = logging.WARNING
@@ -347,6 +360,7 @@ def _connect(cfg: Config, args, *, need_login: bool = True) -> tuple[HttpClient,
 # 子命令实现
 # --------------------------------------------------------------------------
 
+
 def cmd_init(args) -> int:
     target = Path(args.config) if args.config else Path.cwd() / DEFAULT_CONFIG_NAME
     if target.exists():
@@ -389,7 +403,7 @@ def cmd_check(args) -> int:
         has_croypto = 'id="login-croypto"' in html
         has_flowkey = 'id="login-page-flowkey"' in html
         # 旧版 CAS 用 pwdEncryptSalt 承载盐值，id/name 两种写法都可能有
-        is_legacy = 'pwdEncryptSalt' in html and not has_croypto
+        is_legacy = "pwdEncryptSalt" in html and not has_croypto
         if has_croypto and has_flowkey:
             log_ok("登录页结构正常（找到 login-croypto / login-page-flowkey）")
         elif is_legacy:
@@ -402,6 +416,7 @@ def cmd_check(args) -> int:
         # 3. 加密依赖
         try:
             from Crypto.Cipher import AES  # noqa: F401
+
             log_ok("密码加密依赖 pycryptodome 就绪")
         except ImportError:
             log_err("缺少 pycryptodome：pip install pycryptodome")
@@ -519,7 +534,10 @@ def cmd_grab(args) -> int:
             log_warn("dry-run 模式：只会查询余量，不会提交任何选课请求")
 
         poller = Poller(
-            cfg, auth, client, http,
+            cfg,
+            auth,
+            client,
+            http,
             session=session,
             on_event=_make_renderer(notifier, dry_run=args.dry_run),
             dry_run=args.dry_run,
@@ -533,10 +551,9 @@ def cmd_grab(args) -> int:
             log_warn("收到中断信号，正在停止…")
             poller.stop()
 
-        try:
+        # 非主线程无法注册信号处理器，忽略即可
+        with contextlib.suppress(ValueError):
             signal.signal(signal.SIGINT, _on_sigint)
-        except ValueError:  # pragma: no cover - 非主线程
-            pass
 
         stats = poller.run()
         print()
@@ -576,9 +593,9 @@ def cmd_grab(args) -> int:
 # 事件渲染
 # --------------------------------------------------------------------------
 
+
 def _make_renderer(notifier: Notify, *, dry_run: bool = False):
     """把轮询引擎的事件渲染成终端输出。"""
-    state = {"shown_login": False, "last_round": 0}
 
     def render(event: str, payload: dict) -> None:
         if event == "login":
@@ -605,10 +622,12 @@ def _make_renderer(notifier: Notify, *, dry_run: bool = False):
         elif event == "success":
             notifier.success(str(payload.get("course")), str(payload.get("message", "")))
             print()
-            log_ok(Style.bold(
-                f"选课成功：{payload.get('course')} "
-                f"（教学班 {payload.get('class_id')} {payload.get('teacher') or ''}）"
-            ))
+            log_ok(
+                Style.bold(
+                    f"选课成功：{payload.get('course')} "
+                    f"（教学班 {payload.get('class_id')} {payload.get('teacher') or ''}）"
+                )
+            )
             print()
         elif event == "already":
             log_ok(f"已经选过这门课：{payload.get('course')}")
@@ -654,7 +673,6 @@ def _make_renderer(notifier: Notify, *, dry_run: bool = False):
             log_warn(f"  {course}：未找到匹配的教学班")
             return
         for item in classes:
-            remaining = item.get("remaining")
             status = item.get("status")
             if status == "available":
                 text = Style.green(
@@ -679,6 +697,7 @@ def _make_renderer(notifier: Notify, *, dry_run: bool = False):
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
+
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)

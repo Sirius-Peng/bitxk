@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import itertools
 import threading
 import time
 
@@ -55,7 +56,7 @@ class TestRateLimiter:
             t.join()
 
         stamps.sort()
-        gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+        gaps = [b - a for a, b in itertools.pairwise(stamps)]
         assert all(gap >= 0.04 for gap in gaps), f"间隔不足：{gaps}"
 
 

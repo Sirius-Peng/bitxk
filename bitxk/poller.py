@@ -22,12 +22,12 @@ import logging
 import random
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Iterable
 
 from .auth import BitAuth, Session
-from .client import CourseType, XkClient
-from .config import Config, PollConfig, WatchTarget
+from .client import XkClient
+from .config import Config, WatchTarget
 from .exceptions import (
     ApiError,
     BitxkError,
@@ -94,7 +94,8 @@ class _TargetState:
     @property
     def available(self) -> list[TeachingClass]:
         return [
-            tc for tc in self.classes
+            tc
+            for tc in self.classes
             if tc.is_selectable and tc.teaching_class_id not in self.conflicted
         ]
 
@@ -259,9 +260,9 @@ class Poller:
         for _priority, state, tc in pending:
             if self.stop_event.is_set():
                 return
-            if self._try_select(state, tc):
-                if self.config.notify.stop_on_success:
-                    return
+            # 抢到一门就收工（可配置），后续课程不再尝试
+            if self._try_select(state, tc) and self.config.notify.stop_on_success:
+                return
 
     def _refresh_all(self) -> None:
         """刷新所有未完成课程的状态。"""
@@ -306,8 +307,10 @@ class Poller:
         state.classes = filtered
         state.last_error = "" if filtered else "未匹配到教学班"
 
-        if filtered and not state.available and all(
-            tc.status is CourseStatus.CONFLICT for tc in filtered
+        if (
+            filtered
+            and not state.available
+            and all(tc.status is CourseStatus.CONFLICT for tc in filtered)
         ):
             # 所有匹配到的教学班都冲突 —— 这门课再轮询下去也没意义
             state.resolved = True

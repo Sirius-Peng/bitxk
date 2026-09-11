@@ -90,8 +90,11 @@ class TestQueryCourses:
         http = FakeHttp([FakeResponse({"code": "1", "dataList": []})])
         client = XkClient(http)
         client.query_courses(
-            "x", teaching_class_type=CourseType.PUBLIC,
-            batch_code="B", student_code="S", check_capacity="0",
+            "x",
+            teaching_class_type=CourseType.PUBLIC,
+            batch_code="B",
+            student_code="S",
+            check_capacity="0",
         )
         setting = json.loads(http.calls[0]["params"]["querySetting"])
         assert setting["data"]["checkCapacity"] == "0"
@@ -100,8 +103,10 @@ class TestQueryCourses:
         http = FakeHttp([FakeResponse({"code": "1", "dataList": []})])
         client = XkClient(http)
         client.query_courses(
-            "体育/羽毛球", teaching_class_type=CourseType.PE,
-            batch_code="B", student_code="S",
+            "体育/羽毛球",
+            teaching_class_type=CourseType.PE,
+            batch_code="B",
+            student_code="S",
         )
         assert http.calls[0]["url"].endswith("/elective/programCourse.do")
 
@@ -112,7 +117,12 @@ class TestQueryCourses:
                 {
                     "courseName": "科幻文学",
                     "tcList": [
-                        {"teachingClassID": "1001", "teacherName": "张三", "remainCapacity": 3, "capacity": 40},
+                        {
+                            "teachingClassID": "1001",
+                            "teacherName": "张三",
+                            "remainCapacity": 3,
+                            "capacity": 40,
+                        },
                     ],
                 }
             ],
@@ -120,7 +130,9 @@ class TestQueryCourses:
         http = FakeHttp([FakeResponse(payload)])
         client = XkClient(http)
         courses = client.query_courses(
-            "科幻文学", batch_code="B", student_code="S",
+            "科幻文学",
+            batch_code="B",
+            student_code="S",
         )
         assert len(courses) == 1
         tc = courses[0].teaching_classes[0]
@@ -184,17 +196,48 @@ class TestErrorHandling:
     def test_真实业务首页标记被识别(self):
         from bitxk.client import _looks_like_login_page
 
-        assert _looks_like_login_page('<!DOCTYPE html><html><title>选课</title>')
+        assert _looks_like_login_page("<!DOCTYPE html><html><title>选课</title>")
         assert _looks_like_login_page('<p id="login-croypto">x</p>')
         assert _looks_like_login_page('<script src="/xsxkpub.js">')
         assert not _looks_like_login_page("")
         assert not _looks_like_login_page('{"code":"1"}')
 
     def test_返回垃圾内容抛_api_错误(self):
-        http = FakeHttp([FakeResponse(None, text="<<<garbage>>>")])
+        """两种参数传递方式都失败后才报错，避免把「版本差异」误报成「接口坏了」。"""
+        http = FakeHttp(
+            [
+                FakeResponse(None, text="<<<garbage>>>"),
+                FakeResponse(None, text="<<<garbage>>>"),
+            ]
+        )
         client = XkClient(http)
-        with pytest.raises(ApiError):
+        with pytest.raises(ApiError, match="都返回了非 JSON"):
             client.query_courses("x", batch_code="B", student_code="S")
+        assert len(http.calls) == 2
+
+    def test_query_参数失败时自动降级为_form_body(self):
+        """部分版本只认 form body，此时应自动重试而不是直接失败。"""
+        http = FakeHttp(
+            [
+                FakeResponse(None, text="<<<not json>>>"),
+                FakeResponse({"code": "1", "dataList": []}),
+            ]
+        )
+        client = XkClient(http)
+        assert client.query_courses("x", batch_code="B", student_code="S") == []
+        # 第二次请求把参数放进了 body
+        assert "data" in http.calls[1]
+        assert "querySetting" in http.calls[1]["data"]
+        assert "params" not in http.calls[1]
+
+    def test_登录失效时不触发_form_降级(self):
+        """登录失效必须立刻上报，不该白白多发一次请求。"""
+        app_shell = "<!DOCTYPE html><html><title>选课</title>"
+        http = FakeHttp([FakeResponse(None, status_code=200, text=app_shell)])
+        client = XkClient(http)
+        with pytest.raises(TokenExpired):
+            client.query_courses("x", batch_code="B", student_code="S")
+        assert len(http.calls) == 1
 
     def test_网络异常向上抛出(self):
         http = FakeHttp([NetworkError("连接超时")])
@@ -223,7 +266,12 @@ class TestBatches:
                 "name": "张三",
                 "electiveBatchList": [
                     {"code": "OLD", "canSelect": "0", "name": "已结束"},
-                    {"code": "NOW", "canSelect": "1", "name": "第一轮", "schoolTermName": "2024-2025-1"},
+                    {
+                        "code": "NOW",
+                        "canSelect": "1",
+                        "name": "第一轮",
+                        "schoolTermName": "2024-2025-1",
+                    },
                 ],
             },
         }
@@ -234,7 +282,10 @@ class TestBatches:
         assert batch.can_select
 
     def test_没有可选批次时报错并列出已知批次(self):
-        payload = {"code": "1", "data": {"electiveBatchList": [{"code": "A", "canSelect": "0", "name": "已结束"}]}}
+        payload = {
+            "code": "1",
+            "data": {"electiveBatchList": [{"code": "A", "canSelect": "0", "name": "已结束"}]},
+        }
         http = FakeHttp([FakeResponse(payload)])
         client = XkClient(http)
         with pytest.raises(NotInBatchError, match="不在可选课时间"):
@@ -242,10 +293,14 @@ class TestBatches:
 
     def test_候选接口降级(self):
         """第一个接口不返回 data 时自动试第二个。"""
-        http = FakeHttp([
-            FakeResponse({"code": "1", "data": {}}),
-            FakeResponse({"code": "1", "data": {"electiveBatchList": [{"code": "B", "canSelect": "1"}]}}),
-        ])
+        http = FakeHttp(
+            [
+                FakeResponse({"code": "1", "data": {}}),
+                FakeResponse(
+                    {"code": "1", "data": {"electiveBatchList": [{"code": "B", "canSelect": "1"}]}}
+                ),
+            ]
+        )
         client = XkClient(http)
         assert client.current_batch().code == "B"
         assert len(http.calls) == 2
@@ -309,8 +364,14 @@ class TestFindTeachingClasses:
         payload = {
             "code": "1",
             "dataList": [
-                {"courseName": "大学语文", "tcList": [{"teachingClassID": "1", "remainCapacity": 1}]},
-                {"courseName": "大学语文（进阶）", "tcList": [{"teachingClassID": "2", "remainCapacity": 1}]},
+                {
+                    "courseName": "大学语文",
+                    "tcList": [{"teachingClassID": "1", "remainCapacity": 1}],
+                },
+                {
+                    "courseName": "大学语文（进阶）",
+                    "tcList": [{"teachingClassID": "2", "remainCapacity": 1}],
+                },
             ],
         }
         http = FakeHttp([FakeResponse(payload)])

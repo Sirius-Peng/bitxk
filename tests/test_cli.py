@@ -6,16 +6,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 import bitxk.cli as cli
 
-
 # --------------------------------------------------------------------------
 # 参数解析
 # --------------------------------------------------------------------------
+
 
 class TestParser:
     def test_无子命令时返回_0_并打印帮助(self, capsys):
@@ -55,6 +53,7 @@ class TestParser:
 # init
 # --------------------------------------------------------------------------
 
+
 class TestInit:
     def test_生成配置模板(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -67,9 +66,7 @@ class TestInit:
 
     def test_生成的模板能被正确加载(self, tmp_path):
         """模板必须自身合法，否则用户第一步就踩坑。"""
-        from bitxk.config import load_config
-
-        from bitxk.config import SAMPLE_CONFIG
+        from bitxk.config import SAMPLE_CONFIG, load_config
 
         path = tmp_path / "config.toml"
         path.write_text(SAMPLE_CONFIG, encoding="utf-8")
@@ -95,6 +92,7 @@ class TestInit:
 # check
 # --------------------------------------------------------------------------
 
+
 class TestCheck:
     def test_结构正常时返回_0(self, monkeypatch, capsys):
         class FakeResp:
@@ -102,9 +100,14 @@ class TestCheck:
             text = '<p id="login-croypto">k</p><p id="login-page-flowkey">f</p>'
 
         class FakeHttp:
-            def __init__(self, **kwargs): pass
-            def get(self, url, **kwargs): return FakeResp()
-            def close(self): pass
+            def __init__(self, **kwargs):
+                pass
+
+            def get(self, url, **kwargs):
+                return FakeResp()
+
+            def close(self):
+                pass
 
         monkeypatch.setattr(cli, "HttpClient", FakeHttp)
         assert cli.main(["check"]) == 0
@@ -116,9 +119,14 @@ class TestCheck:
             text = "<html>完全不一样</html>"
 
         class FakeHttp:
-            def __init__(self, **kwargs): pass
-            def get(self, url, **kwargs): return FakeResp()
-            def close(self): pass
+            def __init__(self, **kwargs):
+                pass
+
+            def get(self, url, **kwargs):
+                return FakeResp()
+
+            def close(self):
+                pass
 
         monkeypatch.setattr(cli, "HttpClient", FakeHttp)
         assert cli.main(["check"]) == 1
@@ -132,9 +140,14 @@ class TestCheck:
             text = '<input id="pwdEncryptSalt" value="x">'
 
         class FakeHttp:
-            def __init__(self, **kwargs): pass
-            def get(self, url, **kwargs): return FakeResp()
-            def close(self): pass
+            def __init__(self, **kwargs):
+                pass
+
+            def get(self, url, **kwargs):
+                return FakeResp()
+
+            def close(self):
+                pass
 
         monkeypatch.setattr(cli, "HttpClient", FakeHttp)
         assert cli.main(["check"]) == 0
@@ -144,6 +157,7 @@ class TestCheck:
 # --------------------------------------------------------------------------
 # 错误处理
 # --------------------------------------------------------------------------
+
 
 class TestErrors:
     def test_配置文件缺失时返回_4(self, tmp_path, monkeypatch, capsys):
@@ -178,7 +192,8 @@ class TestErrors:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            cli, "_connect",
+            cli,
+            "_connect",
             lambda *a, **k: (_ for _ in ()).throw(NotInBatchError("不在选课时间")),
         )
         assert cli.main(["-c", str(cfg), "grab"]) == 3
@@ -195,11 +210,10 @@ class TestErrors:
 # 手动导入
 # --------------------------------------------------------------------------
 
+
 class TestManualSession:
     def test_token_与_cookie_组合出会话(self):
-        args = cli.parse_args(
-            ["grab", "--token", "tok", "--cookie", "A=1; B=2"]
-        )
+        args = cli.parse_args(["grab", "--token", "tok", "--cookie", "A=1; B=2"])
         from bitxk.config import Config
 
         session = cli._manual_session(args, Config())
@@ -224,10 +238,13 @@ class TestManualSession:
     def test_回跳_url_也能被接受(self):
         from bitxk.config import Config
 
-        args = cli.parse_args([
-            "grab", "--token",
-            "https://xk.bit.edu.cn/x/bitXsxkLogin/casLogin.do?bitXsxkLogin=KEY",
-        ])
+        args = cli.parse_args(
+            [
+                "grab",
+                "--token",
+                "https://xk.bit.edu.cn/x/bitXsxkLogin/casLogin.do?bitXsxkLogin=KEY",
+            ]
+        )
         session = cli._manual_session(args, Config())
         assert session is not None
         assert session.token == "KEY"
@@ -236,6 +253,7 @@ class TestManualSession:
 # --------------------------------------------------------------------------
 # 事件渲染
 # --------------------------------------------------------------------------
+
 
 class TestRenderer:
     def _render(self, event, payload, **kw):

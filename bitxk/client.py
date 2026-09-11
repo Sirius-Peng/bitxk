@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from .auth import API_BASE
 from .exceptions import ApiError, NotInBatchError, RateLimited, TokenExpired
@@ -36,12 +37,12 @@ _CODE_BATCH_ERROR = {"-1", "3", "5"}
 class CourseType:
     """``teachingClassType`` 枚举 —— 决定查哪个池子的课。"""
 
-    RECOMMENDED = "TJKC"   # 系统推荐课程
-    PROGRAM = "FANKC"      # 培养方案内课程
-    PUBLIC = "XGXK"        # 校公选课
-    PE = "TYKC"            # 体育课程
-    MAJOR = "XGKC"         # 专业课 / 跨专业（部分版本）
-    GENERAL = "TJK"        # 通识（部分版本）
+    RECOMMENDED = "TJKC"  # 系统推荐课程
+    PROGRAM = "FANKC"  # 培养方案内课程
+    PUBLIC = "XGXK"  # 校公选课
+    PE = "TYKC"  # 体育课程
+    MAJOR = "XGKC"  # 专业课 / 跨专业（部分版本）
+    GENERAL = "TJK"  # 通识（部分版本）
 
     #: 走 ``programCourse.do`` 查询的类型，其余走 ``publicCourse.do``
     PROGRAM_TYPES = {PROGRAM, PE, RECOMMENDED, MAJOR, GENERAL}
@@ -81,8 +82,14 @@ class XkClient:
         setting_key: str,
         setting: dict,
         extra_query: dict[str, str] | None = None,
+        allow_form_fallback: bool = True,
     ) -> Any:
-        """按 wisedu 的约定调用一个接口并返回解析后的 JSON。"""
+        """按 wisedu 的约定调用一个接口并返回解析后的 JSON。
+
+        参数优先按 query string 传（当前版本的行为）。若服务端返回了
+        非 JSON 内容（部分版本只认 form body），且 ``allow_form_fallback``
+        为真，则自动改用 form body 重试一次。
+        """
         payload = json.dumps(setting, ensure_ascii=False, separators=(",", ":"))
         url = self._url(path)
         query = {setting_key: payload}
@@ -101,13 +108,52 @@ class XkClient:
         try:
             data = resp.json()
         except ValueError as exc:
-            snippet = (resp.text or "")[:300].replace("\n", " ")
             if _looks_like_login_page(resp.text or ""):
                 # 选课系统在未登录 / Token 失效时，不会返回 401，
                 # 而是**返回 200 + 应用首页的 HTML**。这是最容易踩的坑：
                 # 只看状态码会把「登录失效」误判成「接口返回了奇怪的东西」。
                 raise TokenExpired("选课系统返回了页面而非数据，登录态已失效") from exc
+
+            if allow_form_fallback:
+                logger.debug("接口 %s 对 query 参数无响应，改用 form body 重试", path)
+                return self._call_via_form(path, setting_key=setting_key, payload=payload)
+
+            snippet = (resp.text or "")[:300].replace("\n", " ")
             raise ApiError(f"接口 {path} 返回了非 JSON 内容：{snippet}", payload=snippet) from exc
+
+        if not isinstance(data, dict):
+            raise ApiError(f"接口 {path} 返回结构异常：{type(data).__name__}")
+
+        self._raise_for_code(path, data)
+        return data
+
+    def _call_via_form(self, path: str, *, setting_key: str, payload: str) -> Any:
+        """降级路径：把参数放进 form body 再试一次。
+
+        注意这里不再递归回 ``_call``，避免两种模式互相回退造成无限循环。
+        """
+        url = self._url(path)
+        resp = self.http.post(
+            url,
+            data={setting_key: payload, "timestamp": str(int(__import__("time").time() * 1000))},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+        if resp.status_code in (401, 403):
+            raise TokenExpired(f"登录态失效（HTTP {resp.status_code}）")
+        if resp.status_code == 429:
+            raise RateLimited("选课系统限流")
+
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            if _looks_like_login_page(resp.text or ""):
+                raise TokenExpired("选课系统返回了页面而非数据，登录态已失效") from exc
+            snippet = (resp.text or "")[:300].replace("\n", " ")
+            raise ApiError(
+                f"接口 {path} 在 query 与 form 两种方式下都返回了非 JSON 内容：{snippet}",
+                payload=snippet,
+            ) from exc
 
         if not isinstance(data, dict):
             raise ApiError(f"接口 {path} 返回结构异常：{type(data).__name__}")
@@ -251,7 +297,7 @@ class XkClient:
             teaching_class_type=teaching_class_type,
             batch_code=batch_code,
             student_code=student_code,
-            check_capacity="0",   # 必须带上已满的课，否则看不到余量
+            check_capacity="0",  # 必须带上已满的课，否则看不到余量
             check_conflict="0",
         )
 
@@ -379,6 +425,7 @@ class XkClient:
 # 响应语义判定
 # --------------------------------------------------------------------------
 
+
 def _classify_error(msg: str, code: Any = None) -> SelectionOutcome:
     """根据错误文本判定结果类型。
 
@@ -399,8 +446,19 @@ def _classify_error(msg: str, code: Any = None) -> SelectionOutcome:
         return SelectionOutcome.CONFLICT
 
     # 容量类也要先于「已选」判定：「超过限选人数」含「选」字
-    if any(word in text for word in
-           ("超过限选", "限选人数", "人数已满", "已满", "名额", "容量不足", "没有余量", "余量不足")):
+    if any(
+        word in text
+        for word in (
+            "超过限选",
+            "限选人数",
+            "人数已满",
+            "已满",
+            "名额",
+            "容量不足",
+            "没有余量",
+            "余量不足",
+        )
+    ):
         return SelectionOutcome.FULL
 
     if any(word in text for word in ("已选", "重复", "已经选")):
@@ -431,9 +489,14 @@ def _looks_like_login_page(text: str) -> bool:
         return False
     head = text[:4000].lower()
     markers = (
-        "<!doctype html", "<html",              # 是 HTML 而不是数据
-        "sso.bit.edu.cn", "cas/login", "login-croypto",
-        "xsxkapp", "xsxkpub", "选课",
+        "<!doctype html",
+        "<html",  # 是 HTML 而不是数据
+        "sso.bit.edu.cn",
+        "cas/login",
+        "login-croypto",
+        "xsxkapp",
+        "xsxkpub",
+        "选课",
     )
     return any(marker in head for marker in markers)
 

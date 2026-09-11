@@ -10,7 +10,6 @@ import pytest
 
 from bitxk.auth import BitAuth, _extract_error_element, _extract_error_tip
 from bitxk.exceptions import CaptchaRequired, LoginError
-from bitxk.http import HttpClient
 
 
 class FakeResponse:
@@ -76,7 +75,7 @@ class TestLoginFormContract:
         """实测：前端 bundle 里只有 captcha_payload；
         老实现写的 Captcha_payload（大写 C）会被服务端静默忽略。"""
         auth, http = make_auth(
-            FakeResponse(200, LOGIN_PAGE),                 # GET 登录页
+            FakeResponse(200, LOGIN_PAGE),  # GET 登录页
             FakeResponse(302, headers={"Location": "x"}),  # POST 结果
         )
         with pytest.raises(LoginError):
@@ -126,10 +125,7 @@ class TestLoginFormContract:
         )
         with pytest.raises(LoginError):
             auth.login("u", "p")
-        assert (
-            http.calls[1]["headers"]["Content-Type"]
-            == "application/x-www-form-urlencoded"
-        )
+        assert http.calls[1]["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
 
 
 class TestLoginFailures:
@@ -183,7 +179,7 @@ class TestLoginFailures:
         auth, _ = make_auth(
             FakeResponse(200, '<p id="canot-access-code">1510051</p>'),
         )
-        with pytest.raises(LoginError, match="结构已变更|未找到"):
+        with pytest.raises(LoginError, match=r"结构已变更|未找到"):
             auth.login("u", "p")
 
 
@@ -192,15 +188,21 @@ class TestTicketFlow:
         """CAS 标准路径：POST 得到 302 ?ticket=ST-xxx，需回打 service 换票。"""
         auth, http = make_auth(
             FakeResponse(200, LOGIN_PAGE),
-            FakeResponse(302, headers={
-                "Location": "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/"
-                            "bitXsxkLogin/casLogin.do?ticket=ST-abc-123"
-            }),
+            FakeResponse(
+                302,
+                headers={
+                    "Location": "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/"
+                    "bitXsxkLogin/casLogin.do?ticket=ST-abc-123"
+                },
+            ),
             # 回打 service 得到带 xk 侧凭据的跳转
-            FakeResponse(302, headers={
-                "Location": "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/"
-                            "student/register.do?bitXsxkLogin=KEY456"
-            }),
+            FakeResponse(
+                302,
+                headers={
+                    "Location": "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/"
+                    "student/register.do?bitXsxkLogin=KEY456"
+                },
+            ),
             # register.do 返回 token
             FakeResponse(200, '{"code":"1","data":{"token":"TOK","name":"张三"}}'),
         )
@@ -212,9 +214,12 @@ class TestTicketFlow:
     def test_直接拿到_bitXsxkLogin_时直接用(self):
         auth, http = make_auth(
             FakeResponse(200, LOGIN_PAGE),
-            FakeResponse(302, headers={
-                "Location": "https://xk.bit.edu.cn/x/xsxkLogin/casLogin.do?bitXsxkLogin=DIRECT"
-            }),
+            FakeResponse(
+                302,
+                headers={
+                    "Location": "https://xk.bit.edu.cn/x/xsxkLogin/casLogin.do?bitXsxkLogin=DIRECT"
+                },
+            ),
             FakeResponse(200, '{"code":"1","data":{"token":"T2","name":"李四"}}'),
         )
         session = auth.login("u", "p")
@@ -226,9 +231,9 @@ class TestTicketFlow:
         auth, http = make_auth(
             FakeResponse(200, LOGIN_PAGE),
             FakeResponse(302, headers={"Location": "https://xk.bit.edu.cn/step1"}),
-            FakeResponse(302, headers={
-                "Location": "https://xk.bit.edu.cn/final?bitXsxkLogin=FOUND"
-            }),
+            FakeResponse(
+                302, headers={"Location": "https://xk.bit.edu.cn/final?bitXsxkLogin=FOUND"}
+            ),
             FakeResponse(200, '{"code":"1","data":{"token":"T3"}}'),
         )
         session = auth.login("u", "p")
@@ -238,9 +243,7 @@ class TestTicketFlow:
     def test_register_失败时报错并建议手动导入(self):
         auth, _ = make_auth(
             FakeResponse(200, LOGIN_PAGE),
-            FakeResponse(302, headers={
-                "Location": "https://xk.bit.edu.cn/x?bitXsxkLogin=K"
-            }),
+            FakeResponse(302, headers={"Location": "https://xk.bit.edu.cn/x?bitXsxkLogin=K"}),
             FakeResponse(200, text="<html>不是 JSON</html>"),
         )
         with pytest.raises(LoginError, match="手动导入"):
@@ -262,10 +265,7 @@ class TestErrorParsing:
         assert _extract_error_element(html, "login-error-msg") == "用户名或密码错误"
 
     def test_错误提示优先取_login_error_msg(self):
-        html = (
-            '<p id="login-error-code">旧字段</p>'
-            '<p id="login-error-msg"><span>新字段</span></p>'
-        )
+        html = '<p id="login-error-code">旧字段</p><p id="login-error-msg"><span>新字段</span></p>'
         assert _extract_error_tip(html) == "新字段"
 
     def test_兼容旧的_error_code_字段(self):

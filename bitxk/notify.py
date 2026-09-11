@@ -34,13 +34,15 @@ def notify(title: str, message: str) -> bool:
     try:
         if system == "Darwin":
             script = (
-                f'display notification {_as_applescript(message)} '
+                f"display notification {_as_applescript(message)} "
                 f'with title {_as_applescript(title)} sound name "Glass"'
             )
             subprocess.run(
                 ["osascript", "-e", script],
-                check=False, timeout=5,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=5,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             return True
 
@@ -48,8 +50,10 @@ def notify(title: str, message: str) -> bool:
             if shutil.which("notify-send"):
                 subprocess.run(
                     ["notify-send", title, message],
-                    check=False, timeout=5,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=5,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
                 return True
             return False
@@ -66,8 +70,10 @@ def notify(title: str, message: str) -> bool:
             )
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps],
-                check=False, timeout=10,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             return True
     except (OSError, subprocess.SubprocessError) as exc:

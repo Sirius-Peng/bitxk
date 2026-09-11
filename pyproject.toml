@@ -41,3 +41,31 @@ include = ["bitxk*"]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 filterwarnings = ["error::DeprecationWarning:bitxk.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# 显式忽略的理由：
+# BLE001  —— 本项目刻意在事件回调、通知等"尽力而为"的地方宽捕获，
+#            不让次要故障影响抢课主流程。
+# RUF012  —— dataclass 里用 field(default_factory=...) 是正确写法，
+#            类级常量字典共享是可接受的。
+# S110   —— 同上，通知/清理失败无需上抛。
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "BLE001",   # 本项目刻意在"尽力而为"的路径上宽捕获，不让次要故障影响抢课主流程
+    "RUF012",   # dataclass 用 field(default_factory=...) 是正确写法
+    "S110",     # 通知/清理失败无需上抛
+    "RUF022",   # __all__ 按语义分组排列，比字典序更好读
+    "E501",     # 行宽由 ruff format 负责
+    # 文档与注释是中文，全角标点（，。：）是正确写法而非"易混淆字符"
+    "RUF001", "RUF002", "RUF003",
+    # (str, Enum) 保持与 Python 3.10 的兼容性，且 JSON 序列化行为更直观
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试名刻意用中文（可读性优先）且会解包后只用一个返回值
+"tests/*" = ["RUF059", "F841"]
+

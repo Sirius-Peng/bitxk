@@ -9,17 +9,15 @@ from __future__ import annotations
 
 import threading
 
-import pytest
-
 from bitxk.config import Config, PollConfig, WatchTarget
 from bitxk.exceptions import LoginError, NetworkError, RateLimited, TokenExpired
-from bitxk.models import Batch, CourseStatus, SelectionOutcome, SelectionResult, TeachingClass
+from bitxk.models import Batch, SelectionOutcome, SelectionResult, TeachingClass
 from bitxk.poller import Poller
-
 
 # --------------------------------------------------------------------------
 # 测试替身
 # --------------------------------------------------------------------------
+
 
 class FakeAuth:
     def __init__(self, fail_login: Exception | None = None):
@@ -56,18 +54,22 @@ class FakeClient:
         self.batch_calls += 1
         return Batch(code="B1", name="第一轮", can_select=True, school_term="2024-2025-1")
 
-    def find_teaching_classes(self, keyword, *, teaching_class_type="", batch_code="", student_code="", **kw):
+    def find_teaching_classes(
+        self, keyword, *, teaching_class_type="", batch_code="", student_code="", **kw
+    ):
         self.queries += 1
         stage = self.script[min(self.round, len(self.script) - 1)]
         entries = stage.get(keyword, [])
         return [
-            TeachingClass.from_api({
-                "teachingClassID": tc_id,
-                "courseName": keyword,
-                "teacherName": teacher,
-                "remainCapacity": remaining,
-                "capacity": 40,
-            })
+            TeachingClass.from_api(
+                {
+                    "teachingClassID": tc_id,
+                    "courseName": keyword,
+                    "teacherName": teacher,
+                    "remainCapacity": remaining,
+                    "capacity": 40,
+                }
+            )
             for tc_id, remaining, teacher in entries
         ]
 
@@ -140,7 +142,10 @@ def run_poller(client, config, *, max_rounds=40, advance=True, **kwargs):
     events: list[tuple[str, dict]] = []
     http = FakeHttp()
     poller = Poller(
-        config, FakeAuth(), client, http,
+        config,
+        FakeAuth(),
+        client,
+        http,
         on_event=lambda e, p: events.append((e, p)),
         sleep=lambda s: None,
         **kwargs,
@@ -168,6 +173,7 @@ def event_names(events):
 # 用例
 # --------------------------------------------------------------------------
 
+
 class TestBasicFlow:
     def test_有余量立刻抢并成功(self):
         client = FakeClient([{"科幻文学": [("1001", 5, "张三")]}])
@@ -179,11 +185,13 @@ class TestBasicFlow:
         assert "success" in event_names(events)
 
     def test_满员时持续等待直到有余量(self):
-        client = RoundAdvancingClient([
-            {"科幻文学": [("1001", 0, "张三")]},
-            {"科幻文学": [("1001", 0, "张三")]},
-            {"科幻文学": [("1001", 2, "张三")]},
-        ])
+        client = RoundAdvancingClient(
+            [
+                {"科幻文学": [("1001", 0, "张三")]},
+                {"科幻文学": [("1001", 0, "张三")]},
+                {"科幻文学": [("1001", 2, "张三")]},
+            ]
+        )
         cfg = make_config([WatchTarget(name="科幻文学")])
         stats, events, _ = run_poller(client, cfg)
 
@@ -213,14 +221,20 @@ class TestBasicFlow:
 class TestPriority:
     def test_按优先级选择课程(self):
         """两门课都有余量时，优先级小的先提交。"""
-        client = FakeClient([{
-            "低优先级课": [("2002", 5, "李四")],
-            "高优先级课": [("1001", 5, "张三")],
-        }])
-        cfg = make_config([
-            WatchTarget(name="低优先级课", priority=200),
-            WatchTarget(name="高优先级课", priority=10),
-        ])
+        client = FakeClient(
+            [
+                {
+                    "低优先级课": [("2002", 5, "李四")],
+                    "高优先级课": [("1001", 5, "张三")],
+                }
+            ]
+        )
+        cfg = make_config(
+            [
+                WatchTarget(name="低优先级课", priority=200),
+                WatchTarget(name="高优先级课", priority=10),
+            ]
+        )
         _, _, _ = run_poller(client, cfg)
         assert client.submits[0] == "1001"
 
@@ -232,24 +246,32 @@ class TestPriority:
         assert client.submits == ["1001", "2002", "3003"]
 
     def test_禁用课程不参与(self):
-        client = FakeClient([{
-            "启用课": [("1001", 5, "")],
-            "禁用课": [("2002", 5, "")],
-        }])
-        cfg = make_config([
-            WatchTarget(name="启用课", enabled=True),
-            WatchTarget(name="禁用课", enabled=False),
-        ])
+        client = FakeClient(
+            [
+                {
+                    "启用课": [("1001", 5, "")],
+                    "禁用课": [("2002", 5, "")],
+                }
+            ]
+        )
+        cfg = make_config(
+            [
+                WatchTarget(name="启用课", enabled=True),
+                WatchTarget(name="禁用课", enabled=False),
+            ]
+        )
         _, _, _ = run_poller(client, cfg)
         assert client.submits == ["1001"]
 
 
 class TestCapacityChanges:
     def test_从满员变有余量后被抢到(self):
-        client = RoundAdvancingClient([
-            {"课": [("1001", 0, "")]},
-            {"课": [("1001", 1, "")]},
-        ])
+        client = RoundAdvancingClient(
+            [
+                {"课": [("1001", 0, "")]},
+                {"课": [("1001", 1, "")]},
+            ]
+        )
         cfg = make_config([WatchTarget(name="课")])
         stats, _, _ = run_poller(client, cfg)
         assert stats.successes == 1
@@ -310,7 +332,10 @@ class TestOutcomes:
     def test_提交时网络异常不崩溃(self):
         client = FakeClient(
             [{"课": [("1001", 5, "")]}],
-            submit_results=[NetworkError("超时"), SelectionResult(outcome=SelectionOutcome.SUCCESS, message="成功")],
+            submit_results=[
+                NetworkError("超时"),
+                SelectionResult(outcome=SelectionOutcome.SUCCESS, message="成功"),
+            ],
         )
         cfg = make_config([WatchTarget(name="课")])
         stats, events, _ = run_poller(client, cfg)
@@ -342,7 +367,10 @@ class TestAuthRecovery:
     def test_提交时登录失效触发重登(self):
         client = RoundAdvancingClient(
             [{"课": [("1001", 5, "")]}] * 3,
-            submit_results=[TokenExpired("失效"), SelectionResult(outcome=SelectionOutcome.SUCCESS, message="成功")],
+            submit_results=[
+                TokenExpired("失效"),
+                SelectionResult(outcome=SelectionOutcome.SUCCESS, message="成功"),
+            ],
         )
         cfg = make_config([WatchTarget(name="课")])
         stats, _, _ = run_poller(client, cfg)
@@ -357,15 +385,23 @@ class TestAuthRecovery:
                 raise LoginError("账号或密码错误")
 
         class FakeHttp:
-            def set_token(self, t): pass
+            def set_token(self, t):
+                pass
+
             @property
-            def cookies(self): return {}
+            def cookies(self):
+                return {}
+
             @cookies.setter
-            def cookies(self, v): pass
+            def cookies(self, v):
+                pass
 
         cfg = make_config([WatchTarget(name="课")])
         poller = Poller(
-            cfg, FailingAuth(), FakeClient([{"课": []}]), FakeHttp(),
+            cfg,
+            FailingAuth(),
+            FakeClient([{"课": []}]),
+            FakeHttp(),
             on_event=lambda e, p: events.append((e, p)),
             sleep=lambda s: None,
         )
@@ -394,7 +430,9 @@ class TestRateLimit:
         assert stats.rate_limited == 1
         assert "rate_limited" in event_names(events)
         # 间隔被放大
-        assert any(p.get("interval", 0) > cfg.poll.interval for e, p in events if e == "rate_limited")
+        assert any(
+            p.get("interval", 0) > cfg.poll.interval for e, p in events if e == "rate_limited"
+        )
 
     def test_连续错误超过阈值后停止(self):
         class BrokenClient(FakeClient):
@@ -445,15 +483,18 @@ class TestStop:
         stop.set()
 
         class FakeHttp:
-            def set_token(self, t): pass
-            @property
-            def cookies(self): return {}
-            @cookies.setter
-            def cookies(self, v): pass
+            def set_token(self, t):
+                pass
 
-        poller = Poller(
-            cfg, FakeAuth(), client, FakeHttp(), stop_event=stop, sleep=lambda s: None
-        )
+            @property
+            def cookies(self):
+                return {}
+
+            @cookies.setter
+            def cookies(self, v):
+                pass
+
+        poller = Poller(cfg, FakeAuth(), client, FakeHttp(), stop_event=stop, sleep=lambda s: None)
         stats = poller.run()
         assert stats.rounds == 0
 
@@ -476,14 +517,22 @@ class TestBatchUnavailable:
         events: list[tuple[str, dict]] = []
 
         class FakeHttp:
-            def set_token(self, t): pass
+            def set_token(self, t):
+                pass
+
             @property
-            def cookies(self): return {}
+            def cookies(self):
+                return {}
+
             @cookies.setter
-            def cookies(self, v): pass
+            def cookies(self, v):
+                pass
 
         poller = Poller(
-            cfg, FakeAuth(), NoBatchClient([{"课": []}]), FakeHttp(),
+            cfg,
+            FakeAuth(),
+            NoBatchClient([{"课": []}]),
+            FakeHttp(),
             on_event=lambda e, p: events.append((e, p)),
             sleep=lambda s: None,
         )

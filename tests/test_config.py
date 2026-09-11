@@ -154,10 +154,13 @@ class TestConfigValidate:
         assert [c.name for c in cfg.enabled_courses] == ["高", "中", "低"]
 
     def test_禁用的课不参与排序(self):
-        cfg = Config(username="x", courses=[
-            WatchTarget(name="A", enabled=False),
-            WatchTarget(name="B"),
-        ])
+        cfg = Config(
+            username="x",
+            courses=[
+                WatchTarget(name="A", enabled=False),
+                WatchTarget(name="B"),
+            ],
+        )
         assert [c.name for c in cfg.enabled_courses] == ["B"]
 
 

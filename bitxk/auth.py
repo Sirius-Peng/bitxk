@@ -31,6 +31,7 @@ SSO 改版导致自动登录失效，工具依然可用 —— 这是刻意设�
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import re
@@ -41,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .exceptions import CaptchaRequired, LoginError, NetworkError, TokenExpired
+from .exceptions import CaptchaRequired, LoginError
 from .http import HttpClient
 
 logger = logging.getLogger(__name__)
@@ -66,8 +67,7 @@ API_BASE = f"{XK_BASE}/sys/xsxkapp"
 
 #: 校外 WebVPN 前缀（走校园 VPN 时可作为备选基址）。
 WEBVPN_PREFIX = (
-    "https://webvpn.bit.edu.cn/https/"
-    "77726476706e69737468656265737421e3e44ed225397c1e7b0c9ce29b5b"
+    "https://webvpn.bit.edu.cn/https/77726476706e69737468656265737421e3e44ed225397c1e7b0c9ce29b5b"
 )
 
 _ALPHABET = string.ascii_letters + string.digits
@@ -76,6 +76,7 @@ _ALPHABET = string.ascii_letters + string.digits
 # --------------------------------------------------------------------------
 # 密码加密
 # --------------------------------------------------------------------------
+
 
 def _pkcs7_pad(data: bytes, block_size: int = 16) -> bytes:
     pad_len = block_size - (len(data) % block_size)
@@ -133,9 +134,7 @@ def encrypt_password(password: str, key_material: str, mode: str = "ecb") -> str
     # 默认 ECB
     if len(raw_key) not in (16, 24, 32):
         # 长度不对说明页面结构变了，明确报错而不是静默产生错误密文
-        raise LoginError(
-            f"加密密钥长度非法（{len(raw_key)} 字节），登录页结构可能已变更"
-        )
+        raise LoginError(f"加密密钥长度非法（{len(raw_key)} 字节），登录页结构可能已变更")
     cipher = AES.new(raw_key, AES.MODE_ECB)
     return base64.b64encode(cipher.encrypt(_pkcs7_pad(password.encode("utf-8")))).decode("ascii")
 
@@ -143,6 +142,7 @@ def encrypt_password(password: str, key_material: str, mode: str = "ecb") -> str
 # --------------------------------------------------------------------------
 # 凭据与会话
 # --------------------------------------------------------------------------
+
 
 @dataclass
 class Credentials:
@@ -189,7 +189,7 @@ class Session:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Session":
+    def from_dict(cls, data: dict[str, Any]) -> Session:
         return cls(
             token=str(data.get("token", "")),
             cookies=dict(data.get("cookies") or {}),
@@ -202,17 +202,13 @@ class Session:
     def save(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        # 会话文件含登录凭据，收紧权限
-        try:
+        path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        # 会话文件含登录凭据，收紧权限（某些文件系统不支持 chmod，忽略即可）
+        with contextlib.suppress(OSError):
             path.chmod(0o600)
-        except OSError:  # pragma: no cover - 某些文件系统不支持
-            pass
 
     @classmethod
-    def load(cls, path: str | Path) -> "Session | None":
+    def load(cls, path: str | Path) -> Session | None:
         path = Path(path)
         if not path.exists():
             return None
@@ -229,6 +225,7 @@ class Session:
 # --------------------------------------------------------------------------
 # 登录实现
 # --------------------------------------------------------------------------
+
 
 def _parse_tag_value(html: str, element_id: str) -> str | None:
     """从 ``<p id="xxx">value</p>`` 这类标签里取文本。
@@ -286,9 +283,7 @@ class BitAuth:
                 croypto = match.group(1)
                 self.encrypt_mode = "cbc"
         if not flowkey:
-            match = re.search(
-                r'(?:id|name)=["\']execution["\'][^>]*value=["\']([^"\']+)', html
-            )
+            match = re.search(r'(?:id|name)=["\']execution["\'][^>]*value=["\']([^"\']+)', html)
             flowkey = match.group(1) if match else None
 
         if not croypto or not flowkey:
@@ -427,9 +422,7 @@ class BitAuth:
             key = self._key_from_text(resp.url) or self._key_from_text(resp.text)
 
         if not key:
-            raise LoginError(
-                "登录未取得回跳凭据：可能是账号密码错误，或 SSO 页面结构变更。"
-            )
+            raise LoginError("登录未取得回跳凭据：可能是账号密码错误，或 SSO 页面结构变更。")
 
         return self._register(username, key, location)
 
@@ -440,7 +433,7 @@ class BitAuth:
 
         if code == "1320007":
             # 该错误码有两种成因：本会话需要验证码，或该会话的登录请求已失效
-            #（实测：同一 session 第 2 次 POST 必定得到它）。
+            # （实测：同一 session 第 2 次 POST 必定得到它）。
             # 两种情况的处理方式相同 —— 丢弃当前会话重新来一次。
             raise CaptchaRequired(
                 "统一身份认证要求验证码或本次会话已失效（错误码 1320007）。"
@@ -497,8 +490,9 @@ class BitAuth:
         resp = self.http.get(url, params={"number": key})
 
         if resp.status_code in (401, 403):
-            raise LoginError("换取选课系统 token 失败：登录态未被选课系统接受（HTTP %d）"
-                             % resp.status_code)
+            raise LoginError(
+                f"换取选课系统 token 失败：登录态未被选课系统接受（HTTP {resp.status_code}）"
+            )
 
         try:
             payload = resp.json()
@@ -571,6 +565,7 @@ class BitAuth:
 # 小工具
 # --------------------------------------------------------------------------
 
+
 def _quote(text: str) -> str:
     from urllib.parse import quote
 
@@ -604,9 +599,7 @@ def _extract_error_tip(html: str) -> str | None:
         text = _extract_error_element(html, element_id)
         if text:
             return text
-    match = re.search(
-        r'<div[^>]*class=["\'][^"\']*error[^"\']*["\'][^>]*>(.*?)</div>', html, re.S
-    )
+    match = re.search(r'<div[^>]*class=["\'][^"\']*error[^"\']*["\'][^>]*>(.*?)</div>', html, re.S)
     if match:
         text = re.sub(r"<[^>]+>", " ", match.group(1)).strip()
         if text:

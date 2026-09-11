@@ -56,7 +56,15 @@ class TestAsInt:
 class TestAsBool:
     @pytest.mark.parametrize(
         "value,expected",
-        [("1", True), (1, True), ("true", True), ("Y", True), ("0", False), (None, False), ("no", False)],
+        [
+            ("1", True),
+            (1, True),
+            ("true", True),
+            ("Y", True),
+            ("0", False),
+            (None, False),
+            ("no", False),
+        ],
     )
     def test_转换(self, value, expected):
         assert _as_bool(value) is expected
@@ -94,11 +102,15 @@ class TestCapacityInference:
         assert tc.capacity_text == "容量未知"
 
     def test_已选标记优先于容量(self):
-        tc = TeachingClass.from_api({"teachingClassID": "1", "remainCapacity": 0, "isSelected": "1"})
+        tc = TeachingClass.from_api(
+            {"teachingClassID": "1", "remainCapacity": 0, "isSelected": "1"}
+        )
         assert tc.status is CourseStatus.SELECTED
 
     def test_文本里出现冲突字样(self):
-        tc = TeachingClass.from_api({"teachingClassID": "1", "remainCapacity": 5, "remark": "时间冲突"})
+        tc = TeachingClass.from_api(
+            {"teachingClassID": "1", "remainCapacity": 5, "remark": "时间冲突"}
+        )
         assert tc.status is CourseStatus.CONFLICT
 
     def test_满员时不可选(self):
@@ -142,7 +154,9 @@ class TestCourse:
         assert course.teaching_classes[0].teacher == "张三"
 
     def test_教学班字段平铺在课程对象上(self):
-        course = Course.from_api({"courseName": "体育", "teachingClassID": "200", "remainCapacity": 1})
+        course = Course.from_api(
+            {"courseName": "体育", "teachingClassID": "200", "remainCapacity": 1}
+        )
         assert len(course.teaching_classes) == 1
         assert course.teaching_classes[0].teaching_class_id == "200"
 
@@ -157,14 +171,16 @@ class TestCourse:
 
 class TestBatch:
     def test_解析可选批次(self):
-        batch = Batch.from_api({
-            "code": "B2024",
-            "name": "第一轮",
-            "canSelect": "1",
-            "schoolTermName": "2024-2025-1",
-            "beginTime": "2024-09-01 08:00",
-            "endTime": "2024-09-05 18:00",
-        })
+        batch = Batch.from_api(
+            {
+                "code": "B2024",
+                "name": "第一轮",
+                "canSelect": "1",
+                "schoolTermName": "2024-2025-1",
+                "beginTime": "2024-09-01 08:00",
+                "endTime": "2024-09-05 18:00",
+            }
+        )
         assert batch.code == "B2024"
         assert batch.can_select is True
         assert "可选" in str(batch)
