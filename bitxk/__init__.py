@@ -34,6 +34,7 @@ from .exceptions import (
     NetworkError,
     NotInBatchError,
     RateLimited,
+    ServerBusy,
     TokenExpired,
 )
 from .http import HttpClient
@@ -84,5 +85,6 @@ __all__ = [
     "NetworkError",
     "NotInBatchError",
     "RateLimited",
+    "ServerBusy",
     "TokenExpired",
 ]

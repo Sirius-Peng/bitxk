@@ -28,7 +28,14 @@ from collections.abc import Iterable
 from typing import Any
 
 from .auth import API_BASE
-from .exceptions import ApiError, NetworkError, NotInBatchError, RateLimited, TokenExpired
+from .exceptions import (
+    ApiError,
+    NetworkError,
+    NotInBatchError,
+    RateLimited,
+    ServerBusy,
+    TokenExpired,
+)
 from .http import HttpClient
 from .models import (
     Batch,
@@ -62,6 +69,9 @@ _CODE_IMMEDIATE_FAILURE = {"0"}
 _ALL_SUCCESS_CODES = _CODE_SUCCESS | _CODE_SUCCESS_ALIASES
 
 _CODE_BATCH_ERROR = {"-1", "3", "5"}
+
+#: 在线人数超过上限。前端文案：「在线人数超过上限，请稍后再试！」
+_CODE_SERVER_BUSY = {"4"}
 
 
 class CourseType:
@@ -177,21 +187,31 @@ class XkClient:
         path: str,
         data: dict[str, str],
         *,
-        via_query: bool = False,
         raise_on_business_error: bool = True,
     ) -> Any:
-        """发一次业务请求并返回解析后的 JSON 信封。"""
+        """发一次 POST 业务请求并返回解析后的 JSON 信封。
+
+        参数一律放 **POST 表单体**（与生产前端一致）；不放 URL query。
+        """
+        return self._request(
+            "POST",
+            path,
+            headers=self._headers(),
+            data=data,
+            raise_on_business_error=raise_on_business_error,
+        )
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        raise_on_business_error: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """发一次业务请求并解析响应信封（GET/POST 共用）。"""
         url = self._url(path)
-        # 时间戳纯属缓存破坏，前端行为一致；服务端不校验
-        stamp = str(int(__import__("time").time() * 1000))
-
-        kwargs: dict[str, Any] = {"headers": self._headers()}
-        if via_query:
-            kwargs["params"] = {**data, "timestamp": stamp}
-        else:
-            kwargs["data"] = data
-
-        resp = self.http.post(url, **kwargs)
+        resp = self.http.request(method, url, **kwargs)
 
         # token 失效有三种实测形态，必须**先判状态码再解析正文**，
         # 否则 resp.json() 会直接抛异常、连原因都看不到：
@@ -242,6 +262,8 @@ class XkClient:
             raise TokenExpired(f"接口 {path} 要求重新登录：{msg or code_str}")
         if "频繁" in msg or "限制" in msg:
             raise RateLimited(f"接口 {path} 被限流：{msg}")
+        if code_str in _CODE_SERVER_BUSY:
+            raise ServerBusy(msg or "选课系统在线人数已达上限，请稍后再试")
         if code_str in _CODE_BATCH_ERROR and any(word in msg for word in ("批次", "轮次", "阶段")):
             raise NotInBatchError(msg or f"接口 {path} 批次不可用")
 
@@ -260,13 +282,32 @@ class XkClient:
         if not code:
             raise ApiError("获取学生信息需要学号（studentInfo 端点形如 student/<学号>.do）")
 
-        payload = self._post(f"student/{code}.do", {})
+        # 前端是 **GET** student/<学号>.do?timestamp=<ms>，不是 POST。
+        # 用 GET 才能与生产行为一致（POST 在部分网关配置下会被拒）。
+        payload = self._request(
+            "GET",
+            f"student/{code}.do",
+            # 鉴权头不能漏：漏了会拿到首页 HTML，表现成"登录态失效"
+            headers=self._headers(),
+            params={"timestamp": str(int(time.time() * 1000))},
+        )
+
+        # 有学籍信息时，data.code 就是学号；为空说明该账号没有学籍
         info = payload.get("data")
         if not isinstance(info, dict) or not info:
             raise ApiError(f"学生信息接口未返回 data：{payload.get('msg') or payload}")
 
-        # 顺手记下校区码 —— 查询接口的 campus 不是固定常量
-        campus = _pick(info, "campus", "campusCode", "xq")
+        number = _pick(info, "code", "number", "xh")
+        if number in (None, ""):
+            raise ApiError(
+                "登录的账户未查询到学籍信息。请确认使用的是本科生账号，"
+                "并已在统一身份认证中完成登录。"
+            )
+
+        # 注意：campus **不是**学生信息里的字段（前端是按每个课程行取
+        # data.campus 并回填到按钮上的）。这里只在接口确实给出时顺带记录，
+        # 拿不到就保持调用方传入的值（默认空，由服务端兜底）。
+        campus = _pick(info, "campus", "campusCode")
         if campus not in (None, ""):
             self.campus = str(campus).strip()
         return info

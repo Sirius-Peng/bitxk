@@ -45,23 +45,20 @@ class FakeHttp:
         self.token = None
         self.student_code = "1120200001"
 
-    def post(self, url, **kwargs):
-        self.calls.append({"method": "POST", "url": url, **kwargs})
+    def request(self, method, url, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
         if not self.responses:
-            raise AssertionError(f"没有预置响应了，却被请求：{url}")
+            raise AssertionError(f"没有预置响应了，却被请求：{method} {url}")
         resp = self.responses.pop(0)
         if isinstance(resp, Exception):
             raise resp
         return resp
 
+    def post(self, url, **kwargs):
+        return self.request("POST", url, **kwargs)
+
     def get(self, url, **kwargs):
-        self.calls.append({"method": "GET", "url": url, **kwargs})
-        if not self.responses:
-            raise AssertionError(f"没有预置响应了，却被请求：{url}")
-        resp = self.responses.pop(0)
-        if isinstance(resp, Exception):
-            raise resp
-        return resp
+        return self.request("GET", url, **kwargs)
 
     def set_token(self, token):
         self.token = token
@@ -346,6 +343,7 @@ class TestBatches:
     def test_批次来自_student_学号端点(self):
         payload = envelope(
             data={
+                "code": "1120200001",
                 "name": "张三",
                 "number": "1120200001",
                 "campus": "1",
@@ -359,11 +357,37 @@ class TestBatches:
 
     def test_自动读取校区码(self):
         """campus 不是固定常量，必须从学生信息里取。"""
-        payload = envelope(data={"campus": "7", "electiveBatchList": []})
+        payload = envelope(data={"code": "S", "campus": "7", "electiveBatchList": []})
         client, _ = make_client(payload)
         assert client.campus == ""
         client.student_info("S")
         assert client.campus == "7"
+
+    def test_无学籍信息时给出明确报错(self):
+        """data.code 为空 = 该账号没有学籍（例如用研究生账号登本科系统）。"""
+        payload = envelope(data={"code": "", "name": "某人"})
+        client, _ = make_client(payload)
+        with pytest.raises(ApiError, match="未查询到学籍信息"):
+            client.student_info("S")
+
+    def test_学生信息走GET请求(self):
+        """前端是 GET student/<学号>.do?timestamp=...，POST 在部分网关下会被拒。"""
+        payload = envelope(data={"code": "S", "electiveBatchList": []})
+        client, http = make_client(payload)
+        client.student_info("S")
+        call = http.calls[0]
+        assert call["method"] == "GET"
+        assert "timestamp" in (call.get("params") or {})
+
+    def test_学生信息必须带鉴权头(self):
+        """回归防线：漏掉 token header 会拿到首页 HTML，表现成"登录态失效"。"""
+        payload = envelope(data={"code": "S", "electiveBatchList": []})
+        client, http = make_client(payload)
+        client.http.token = "TOK"
+        client.student_info("S")
+        headers = http.calls[0]["headers"]
+        assert headers["token"] == "TOK"
+        assert headers["language"]
 
     def test_bind_可手工绑定(self):
         client, http = make_client()
@@ -374,6 +398,7 @@ class TestBatches:
     def test_取当前可选批次(self):
         payload = envelope(
             data={
+                "code": "S",
                 "campus": "2",
                 "electiveBatchList": [
                     {"code": "OLD", "canSelect": "0", "name": "已结束"},
@@ -389,6 +414,7 @@ class TestBatches:
     def test_实验课批次也被纳入(self):
         payload = envelope(
             data={
+                "code": "S",
                 "electiveBatchList": [],
                 "expElectiveBatchList": [{"code": "EXP", "canSelect": "1", "name": "实验课轮次"}],
             }
@@ -400,6 +426,7 @@ class TestBatches:
         """前端要求 needConfirm 已确认才能选，未确认的批次提交必被拒。"""
         payload = envelope(
             data={
+                "code": "S",
                 "electiveBatchList": [
                     {"code": "NEED", "canSelect": "1", "needConfirm": "1", "isConfirmed": "0"},
                     {"code": "OK", "canSelect": "1"},
@@ -411,7 +438,10 @@ class TestBatches:
 
     def test_没有可选批次时报错并列出已知批次(self):
         payload = envelope(
-            data={"electiveBatchList": [{"code": "A", "canSelect": "0", "name": "已结束"}]}
+            data={
+                "code": "S",
+                "electiveBatchList": [{"code": "A", "canSelect": "0", "name": "已结束"}],
+            }
         )
         client, _ = make_client(payload)
         with pytest.raises(NotInBatchError, match="不在可选课时间"):
@@ -664,3 +694,80 @@ class TestCourseType:
     def test_未知类型回退为原文(self):
         assert CourseType.label("ZZZZ") == "ZZZZ"
         assert CourseType.endpoint("ZZZZ") == CourseType.DEFAULT_ENDPOINT
+
+
+class TestServerBusy:
+    """本科系统高峰期返回 code=4（在线人数超过上限）。"""
+
+    def test_code4_抛出_ServerBusy(self):
+        from bitxk.exceptions import ServerBusy
+
+        client, _ = make_client(envelope(code="4", msg="在线人数超过上限，请稍后再试！"))
+        with pytest.raises(ServerBusy, match="在线人数"):
+            client.query_courses("x", batch_code="B", student_code="S")
+
+    def test_busy_不是登录失效(self):
+        """别把它误判成 token 过期，否则会陷入无意义的重登循环。"""
+        from bitxk.exceptions import ServerBusy
+
+        client, _ = make_client(envelope(code="4", msg="在线人数超过上限"))
+        with pytest.raises(ServerBusy):
+            client.query_courses("x", batch_code="B", student_code="S")
+
+    def test_注册阶段_inline_busy(self):
+        """register.do 返回 code=4 时，auth 层要抛 ServerBusy 供上层重试。"""
+        from bitxk.auth import BitAuth
+        from bitxk.exceptions import ServerBusy
+
+        busy = FakeResponse({"data": None, "msg": "在线人数超过上限，请稍后再试！", "code": "4"})
+
+        class FakeAuthHttp:
+            token = None
+            student_code = ""
+
+            def get(self, url, **kwargs):
+                return busy
+
+            def post(self, url, **kwargs):
+                return busy
+
+            @property
+            def cookies(self):
+                return {}
+
+            @cookies.setter
+            def cookies(self, value):
+                pass
+
+        auth = BitAuth(FakeAuthHttp())
+        with pytest.raises(ServerBusy, match="在线人数"):
+            auth._register("S", "KEY")
+
+    def test_无学籍时报错提示用本科生账号(self):
+        """研究生账号登本科系统时 data 为空，应给出可操作的提示。"""
+        from bitxk.auth import BitAuth
+        from bitxk.exceptions import LoginError
+
+        no_enrollment = FakeResponse({"data": "", "msg": "登录的账户未查询到学籍信息", "code": "1"})
+
+        class FakeAuthHttp:
+            token = None
+            student_code = ""
+
+            def get(self, url, **kwargs):
+                return no_enrollment
+
+            def post(self, url, **kwargs):
+                return no_enrollment
+
+            @property
+            def cookies(self):
+                return {}
+
+            @cookies.setter
+            def cookies(self, value):
+                pass
+
+        auth = BitAuth(FakeAuthHttp())
+        with pytest.raises(LoginError):
+            auth._register("S", "KEY")

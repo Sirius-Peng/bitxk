@@ -1,8 +1,12 @@
 # bitxk
 
-北京理工大学（金智 wisedu `xsxkapp` 选课系统）**课程余量轮询 + 自动选课**命令行工具。
+**北京理工大学本科生选课系统**（金智 wisedu `xsxkapp`，`xk.bit.edu.cn/xsxkapp`）
+**课程余量轮询 + 自动选课**命令行工具。
 
-适用场景：补选 / 退换课 / 试听退换课阶段，某门课已经选满，你希望有人退课时**自动帮你补上**。
+适用场景：**补选 / 退换课 / 试听退换课**阶段，某门课已经选满，你希望有人退课时**自动帮你补上**。
+
+> 适用对象仅限**本科生**。研究生教务系统（`grdms.bit.edu.cn`）是另一套 DWR 协议的老系统，
+> 接口完全不同，本工具不适用。
 
 ---
 
@@ -15,6 +19,7 @@
 - [快速开始](#快速开始)
 - [配置说明](#配置说明)
 - [命令参考](#命令参考)
+- [校外访问](#校外访问)
 - [兜底方案：手动导入登录态](#兜底方案手动导入登录态)
 - [轮询策略与请求节制](#轮询策略与请求节制)
 - [故障排查](#故障排查)
@@ -60,8 +65,18 @@
 
 ### 1. 登录链路
 
+本科选课系统首页里注入的常量（直接从页面源码读到，非推测）：
+
+```js
+BaseUrl   = "https://xk.bit.edu.cn/xsxkapp";
+casUrl    = "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/bitXsxkLogin/casLogin.do";
+loginType = "cas";      // 走统一身份认证
 ```
-GET  https://sso.bit.edu.cn/cas/login?service=<选课系统 casLogin>
+
+登录链路：
+
+```
+GET  https://sso.bit.edu.cn/cas/login?service=<上面的 casUrl>
        HTML 里藏着：
          login-croypto        -> base64 字符串，作为 AES 密钥
          login-page-flowkey   -> 作为 execution（服务端加密 JWT，必须逐字节原样回填）
@@ -125,7 +140,27 @@ querySetting={"data":{"studentCode":"...","campus":"...","electiveBatchCode":"..
   `tcList[]` 子项用 `numberOfSelected`（已选总数）。判满优先信任服务端的 `isFull == '1'`。
 - **`campus` 不是常量**，取自 `student/<学号>.do`；写死会把其他校区的课查漏。
 
-### 2.1 选课是异步的
+### 2.1 针对本科系统的核对结论
+
+以下每一条都在**本科前端源码**里逐字确认过，不是按 wisedu 通用形态推测的：
+
+| 核对项 | 结果 |
+|---|---|
+| 8 种 `teachingClassType` | 8 个值全部出现在本科 `grablessons.js`，且对应 8 个页面 Tab |
+| Tab DOM id | `aRecommendCourse` / `aProgramCourse` / `aUnProgramCourse` / `aPublicCourse` / `aRetakeCourse` / `aSportCourse` / `aMinorCourse` / `aSchoolCourse` —— 与枚举一一对应 |
+| 选课是异步的 | 本科前端确实调用 `addVolunteer` → `initProcessInterval` 轮询确认 |
+| 学生信息端点 | 本科 `index.js` 里是 **GET** `student/<学号>.do?timestamp=<ms>`（不是 POST） |
+| 批次判定 | `electiveBatchList[i].canSelect == '1'`；另需 `needConfirm != '1'` 或 `isConfirmed == '1'` |
+| 换 token | 本科 `loginInUserRegister.js` 调 `student/register.do?number=<uid>`，取 `data.token` |
+| `campus` | **不是**学生信息字段 —— 前端是按每个课程行的 `data.campus` 取值。故本工具不臆造，留空由服务端兜底 |
+| 账号类型校验 | `data.code` 为空即"无学籍信息"（例如用研究生账号登本科系统），工具会明确报错 |
+
+另外，本科系统在高峰期会用信封 `code == "4"` 拒绝新会话
+（文案「在线人数超过上限，请稍后再试！」）。这是**很常见**的情况，
+工具把它当作可重试状态退避处理，**不计入连续错误**——
+否则会在选课高峰刚开放时就把程序误判退出。
+
+### 2.2 选课是异步的
 
 这是最容易实现错的一点：
 
@@ -140,7 +175,7 @@ POST elective/volunteer.do           → code == "1"  仅表示「已受理」�
 `SelectionResult` 区分了三种"还没定论"的状态：`ACCEPTED`（已受理）、
 `PENDING`（轮询超时，**不等于失败**）、`SUCCESS`（已确认）。
 
-### 2.2 token 失效有三种形态
+### 2.3 token 失效有三种形态
 
 实测都得处理，只看状态码会漏：
 
@@ -321,6 +356,29 @@ bitxk grab -v                  输出调试日志
 
 ---
 
+## 校外访问
+
+在**校内网络**（校园网 / 学校 VPN 客户端）下直接运行即可，无需额外配置。
+
+在校外且不想装 VPN 客户端时，有两条路：
+
+1. **先在浏览器登录，再手动导入登录态**（推荐，最省事）——
+   见下一节的 `--token` / `--cookie` 用法。
+   工具本身仍能直连 `xk.bit.edu.cn`，缺的只是登录态。
+2. **走本地代理**——如果你有可用的 HTTP 代理，填到配置里：
+
+   ```toml
+   [http]
+   proxy = "http://127.0.0.1:7890"
+   ```
+
+   注意 `webvpn.bit.edu.cn` 是**网页版网关**（它把目标站点嵌在路径里），
+   不是 HTTP 代理，不能直接填进 `proxy`。
+   浏览器里通过 WebVPN 登录后复制 Cookie 用第 1 种方式导入，反而更稳。
+
+> 顺带一提：能连通学校服务器本身就说明网络没问题；
+> `bitxk check` 会告诉你当前能否直连。
+
 ## 兜底方案：手动导入登录态
 
 如果学校改了 SSO 登录页结构，自动登录会失效（`bitxk check` 会提前告诉你）。此时用浏览器里的登录态兜底：
@@ -379,6 +437,16 @@ bitxk grab --student-code '1120200001' \
 
 大概率是容量字段命名与预期不同。用 `-v` 跑一次，日志里会打印原始响应字段；`TeachingClass` 会记录 `capacity_source` 说明它是从哪个字段推出来的。请带日志提 issue。
 
+### 提示「在线人数已达上限」
+
+选课系统限制并发在线人数，高峰期限流。这是**正常现象**，工具会自动退避重试，
+不需要你做任何事；也不会因此退出。想减少撞上的概率，可以把 `interval` 调大一些。
+
+### 提示「未查询到学籍信息」
+
+说明登录成功了，但这个账号在**本科**选课系统里没有学籍 ——
+最常见的原因是用研究生账号登录本科系统。请确认用的是本科学号。
+
 ### 一直卡在「已受理待确认」
 
 正常现象，说明选课请求已被系统受理、后台正在排队处理。工具会自动轮询
@@ -419,7 +487,7 @@ bitxk/
 ├── notify.py         响铃与系统通知
 └── exceptions.py     分层异常
 
-tests/                271 个测试，全部用假 HTTP 层，不发真实请求
+tests/                285 个测试，全部用假 HTTP 层，不发真实请求
 ```
 
 ---

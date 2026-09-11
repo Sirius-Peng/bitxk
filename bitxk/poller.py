@@ -35,6 +35,7 @@ from .exceptions import (
     NetworkError,
     NotInBatchError,
     RateLimited,
+    ServerBusy,
     TokenExpired,
 )
 from .http import HttpClient
@@ -204,9 +205,12 @@ class Poller:
         self.http.set_token(self.session.token)
         self.student_code = self.session.student_code or self.config.username
 
-        # 校区码与学号都必须来自学生信息接口，不能用常量：
-        # campus 写错会把其他校区的课查漏，学号决定 student/<学号>.do 的路径。
-        info = self.client.student_info(self.student_code)
+        # 高峰期选课系统会以 code=4 拒绝新会话；启动阶段遇到就退避重试，
+        # 而不是直接判定登录失败（那不是账号问题）。
+        info = self._retry_on_busy(
+            lambda: self.client.student_info(self.student_code),
+            what="获取学生信息",
+        )
         campus = str(info.get("campus") or info.get("campusCode") or "")
         name = str(info.get("name") or self.session.student_name or "")
         number = str(info.get("number") or info.get("code") or self.student_code)
@@ -221,7 +225,10 @@ class Poller:
             campus=campus,
         )
 
-        batch = self.client.current_batch(self.student_code)
+        batch = self._retry_on_busy(
+            lambda: self.client.current_batch(self.student_code),
+            what="获取选课批次",
+        )
         self.batch_code = batch.code
         self._emit("batch", batch=str(batch))
 
@@ -235,7 +242,11 @@ class Poller:
             )
         self._emit("login", username=cfg.username)
         try:
-            session = self.auth.login(cfg.username, cfg.password)
+            # 高峰期会被 code=4 挡住，这不是账号问题，必须退避重试
+            session = self._retry_on_busy(
+                lambda: self.auth.login(cfg.username, cfg.password),
+                what="统一身份认证",
+            )
         except Exception:
             self.stats.errors += 1
             raise
@@ -248,6 +259,32 @@ class Poller:
             name=session.student_name,
             code=session.student_code,
         )
+
+    def _retry_on_busy(self, action, *, what: str, attempts: int = 6):
+        """执行 ``action``，遇到「在线人数上限」就退避重试。
+
+        Args:
+            action: 无参可调用对象。
+            what: 用于日志的动作描述。
+            attempts: 最多尝试次数（含首次）。
+        """
+        cooldown = max(self.config.poll.rate_limit_cooldown, 5.0)
+        last: ServerBusy | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return action()
+            except ServerBusy as exc:
+                last = exc
+                if attempt >= attempts:
+                    break
+                self._emit(
+                    "server_busy",
+                    cooldown=cooldown,
+                    message=f"{what}失败：{exc}（第 {attempt}/{attempts} 次，稍后重试）",
+                )
+                self._sleep(cooldown)
+        assert last is not None
+        raise last
 
     def _save_session(self) -> None:
         if not self.session:
@@ -303,6 +340,9 @@ class Poller:
             return
         except RateLimited:
             self._handle_rate_limit()
+            return
+        except ServerBusy as exc:
+            self._handle_server_busy(str(exc))
             return
         except NotInBatchError as exc:
             state.last_error = str(exc)
@@ -385,6 +425,9 @@ class Poller:
             return False
         except RateLimited:
             self._handle_rate_limit()
+            return False
+        except ServerBusy as exc:
+            self._handle_server_busy(str(exc))
             return False
         except (NetworkError, ApiError) as exc:
             self._note_error(f"[{target.name}] 提交失败：{exc}")
@@ -494,6 +537,18 @@ class Poller:
         # 自适应退让：最多放大到 8 倍
         self._interval = min(self._interval * 1.5, self.config.poll.interval * 8)
         self._emit("rate_limited", cooldown=cooldown, interval=round(self._interval, 2))
+        self._sleep(cooldown)
+
+    def _handle_server_busy(self, message: str) -> None:
+        """选课系统在线人数达上限：等一会儿再来，不算失败。
+
+        这是本科选课系统在高峰期常见的响应（信封 ``code == "4"``）。
+        它不是我们的错误、也不是账号问题，所以不计入连续错误，
+        否则会在高峰期把程序提前退出。
+        """
+        self.stats.rate_limited += 1
+        cooldown = self.config.poll.rate_limit_cooldown
+        self._emit("server_busy", cooldown=cooldown, message=message)
         self._sleep(cooldown)
 
     def _note_error(self, message: str) -> None:

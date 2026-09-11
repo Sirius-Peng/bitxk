@@ -93,65 +93,88 @@ class TestInit:
 # --------------------------------------------------------------------------
 
 
+def make_check_http(page_html: str, *, cas_status: int = 302):
+    """构造 check 用的假 HTTP 客户端。
+
+    check 会依次请求：选课系统首页、CAS 入口、统一身份认证登录页，
+    因此假客户端必须按 URL 分流返回。
+    """
+
+    class FakeResp:
+        def __init__(self, status_code=200, text="", headers=None):
+            self.status_code = status_code
+            self.text = text
+            self.headers = headers or {}
+
+    class FakeHttp:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, url, **kwargs):
+            # 注意：SSO 登录页的 URL 里也含 "casLogin.do"（它是 service 参数），
+            # 所以判别要用更精确的路径，否则登录页会被误当成 CAS 入口。
+            if "bitXsxkLogin/casLogin.do" in url and "sso.bit.edu.cn" not in url:
+                headers = (
+                    {"Location": "https://sso.bit.edu.cn/cas/login?service=x"}
+                    if cas_status in (301, 302, 303, 307, 308)
+                    else {}
+                )
+                return FakeResp(cas_status, headers=headers)
+            # 统一身份认证登录页（以及首页）都返回这份 HTML
+            return FakeResp(200, page_html)
+
+        def close(self):
+            pass
+
+    return FakeHttp
+
+
 class TestCheck:
     def test_结构正常时返回_0(self, monkeypatch, capsys):
-        class FakeResp:
-            status_code = 200
-            text = '<p id="login-croypto">k</p><p id="login-page-flowkey">f</p>'
-
-        class FakeHttp:
-            def __init__(self, **kwargs):
-                pass
-
-            def get(self, url, **kwargs):
-                return FakeResp()
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(cli, "HttpClient", FakeHttp)
+        monkeypatch.setattr(
+            cli,
+            "HttpClient",
+            make_check_http('<p id="login-croypto">k</p><p id="login-page-flowkey">f</p>'),
+        )
         assert cli.main(["check"]) == 0
         assert "自检通过" in capsys.readouterr().out
 
     def test_登录页改版时返回_1_并提示兜底方案(self, monkeypatch, capsys):
-        class FakeResp:
-            status_code = 200
-            text = "<html>完全不一样</html>"
-
-        class FakeHttp:
-            def __init__(self, **kwargs):
-                pass
-
-            def get(self, url, **kwargs):
-                return FakeResp()
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(cli, "HttpClient", FakeHttp)
+        monkeypatch.setattr(cli, "HttpClient", make_check_http("<html>完全不一样</html>"))
         assert cli.main(["check"]) == 1
         out = capsys.readouterr().out
         assert "登录页结构已变更" in out
         assert "--cookie" in out
 
     def test_旧版登录页时提示_cbc_模式(self, monkeypatch, capsys):
-        class FakeResp:
-            status_code = 200
-            text = '<input id="pwdEncryptSalt" value="x">'
-
-        class FakeHttp:
-            def __init__(self, **kwargs):
-                pass
-
-            def get(self, url, **kwargs):
-                return FakeResp()
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(cli, "HttpClient", FakeHttp)
+        monkeypatch.setattr(
+            cli, "HttpClient", make_check_http('<input id="pwdEncryptSalt" value="x">')
+        )
         assert cli.main(["check"]) == 0
         assert "cbc" in capsys.readouterr().out
+
+    def test_会校验_CAS_入口(self, monkeypatch, capsys):
+        """本科系统的 CAS 入口应 302 到统一身份认证，这一跳值得单独验证。"""
+        monkeypatch.setattr(
+            cli,
+            "HttpClient",
+            make_check_http('<p id="login-croypto">k</p><p id="login-page-flowkey">f</p>'),
+        )
+        cli.main(["check"])
+        assert "CAS 入口正常" in capsys.readouterr().out
+
+    def test_CAS_入口异常时只告警不失败(self, monkeypatch, capsys):
+        """入口探测失败通常只是临时网络问题，不该让整个自检判失败。"""
+        monkeypatch.setattr(
+            cli,
+            "HttpClient",
+            make_check_http(
+                '<p id="login-croypto">k</p><p id="login-page-flowkey">f</p>',
+                cas_status=502,
+            ),
+        )
+        assert cli.main(["check"]) == 0
+        assert "CAS 入口" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------

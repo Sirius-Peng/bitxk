@@ -16,6 +16,7 @@ __all__ = [
     "ApiError",
     "RateLimited",
     "NotInBatchError",
+    "ServerBusy",
 ]
 
 
@@ -58,6 +59,15 @@ class ApiError(BitxkError):
 
 class RateLimited(BitxkError):
     """被服务端限流。应当显著放慢轮询频率。"""
+
+
+class ServerBusy(BitxkError):
+    """选课系统当前在线人数已达上限，暂时拒绝新会话。
+
+    本科选课系统的信封里用 ``code == "4"`` 表示这种情况，前端提示
+    「在线人数超过上限，请稍后再试！」。这不是账号或密码问题，
+    等一会儿重试即可，所以**绝不能当成致命错误退出**。
+    """
 
 
 class NotInBatchError(BitxkError):

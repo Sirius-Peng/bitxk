@@ -412,7 +412,18 @@ def cmd_check(args) -> int:
             log_err(f"选课系统返回 HTTP {resp.status_code}")
             ok = False
 
-        # 2. 统一身份认证登录页结构
+        # 2. 本科选课系统的 CAS 入口（首页里注入的 casUrl）
+        log("检查选课系统 CAS 入口…")
+        resp = http.get(f"{API_BASE}/bitXsxkLogin/casLogin.do", allow_redirects=False)
+        location = resp.headers.get("Location", "")
+        if resp.status_code in (301, 302, 303, 307, 308) and "sso.bit.edu.cn/cas/login" in location:
+            log_ok("CAS 入口正常（302 → 统一身份认证）")
+        elif resp.status_code in (301, 302, 303, 307, 308):
+            log_warn(f"CAS 入口重定向到了非预期地址：{location[:80]}")
+        else:
+            log_warn(f"CAS 入口返回 HTTP {resp.status_code}（预期 302）")
+
+        # 3. 统一身份认证登录页结构
         log("检查统一身份认证登录页结构…")
         url = f"{CAS_LOGIN_URL}?service=https%3A%2F%2Fxk.bit.edu.cn%2Fxsxkapp%2Fsys%2Fxsxkapp%2FbitXsxkLogin%2FcasLogin.do"
         resp = http.get(url)
@@ -430,7 +441,7 @@ def cmd_check(args) -> int:
             print("     兜底方案：在浏览器里登录后，用 --cookie 与 --token 手动导入。")
             ok = False
 
-        # 3. 加密依赖
+        # 4. 加密依赖
         try:
             from Crypto.Cipher import AES  # noqa: F401
 
@@ -439,9 +450,9 @@ def cmd_check(args) -> int:
             log_err("缺少 pycryptodome：pip install pycryptodome")
             ok = False
 
-        # 4. 网络出口（判断是否需要 WebVPN）
+        # 5. 网络出口
         log("检测网络环境…")
-        log_ok("能连通学校服务器，当前处于可直连环境")
+        log_ok("能直连学校服务器（校内网络或已挂学校 VPN）")
 
     except BitxkError as exc:
         log_err(f"网络检查失败：{exc}")
@@ -670,6 +681,11 @@ def _make_renderer(notifier: Notify, *, dry_run: bool = False):
                 log(f"{prefix} {payload.get('course')} {message}")
         elif event == "relogin":
             log_warn("登录态失效，正在重新登录…")
+        elif event == "server_busy":
+            log_warn(
+                f"选课系统在线人数已达上限，冷却 {payload.get('cooldown')} 秒后重试"
+                f"（{payload.get('message') or ''}）"
+            )
         elif event == "rate_limited":
             log_warn(
                 f"被服务端限流，冷却 {payload.get('cooldown')} 秒；"

@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .exceptions import CaptchaRequired, LoginError
+from .exceptions import CaptchaRequired, LoginError, ServerBusy
 from .http import HttpClient
 
 logger = logging.getLogger(__name__)
@@ -508,6 +508,18 @@ class BitAuth:
         if not isinstance(data, dict) or not data.get("token"):
             code = payload.get("code") if isinstance(payload, dict) else None
             msg = payload.get("msg") if isinstance(payload, dict) else str(payload)[:120]
+
+            # code == '4'：在线人数超过上限。属于"稍后再试"，不是登录失败，
+            # 用 ServerBusy 让上层退避重试，避免高峰期直接退出。
+            if str(code) == "4":
+                raise ServerBusy(msg or "选课系统在线人数已达上限，请稍后再试")
+
+            # data 有值但没有 token，通常是该账号没有学籍（如研究生账号登本科系统）
+            if isinstance(data, dict) and data and not data.get("token"):
+                raise LoginError(
+                    f"登录成功但未取得选课凭证，且该账号无学籍信息（{msg or code}）。"
+                    "请确认使用的是本科生账号。"
+                )
             raise LoginError(f"换取 token 失败：code={code} msg={msg}")
 
         return Session(

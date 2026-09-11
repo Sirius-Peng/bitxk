@@ -542,3 +542,83 @@ class TestBatchUnavailable:
         stats = poller.run()
         assert "fatal" in event_names(events)
         assert stats.rounds == 0
+
+
+class TestServerBusy:
+    """高峰期「在线人数超过上限」（信封 code=4）。
+
+    这是本科选课系统很常见的响应，**不是**账号问题，
+    必须退避重试而不是判定失败退出。
+    """
+
+    def test_查询时遇到_busy_会重试而不是退出(self):
+        from bitxk.exceptions import ServerBusy
+
+        class BusyOnceClient(FakeClient):
+            def __init__(self):
+                super().__init__([{"课": [("1001", 1, "")]}])
+                self.busy = False
+
+            def find_teaching_classes(self, keyword, **kwargs):
+                if not self.busy:
+                    self.busy = True
+                    raise ServerBusy("在线人数超过上限，请稍后再试！")
+                return super().find_teaching_classes(keyword, **kwargs)
+
+        cfg = make_config([WatchTarget(name="课")])
+        stats, events, _ = run_poller(BusyOnceClient(), cfg)
+
+        assert "server_busy" in event_names(events)
+        assert stats.successes == 1
+        assert stats.rounds > 1
+
+    def test_busy_不计入连续错误(self):
+        """否则高峰期会因连续错误超阈值而提前退出。"""
+        from bitxk.exceptions import ServerBusy
+
+        class AlwaysBusyClient(FakeClient):
+            def find_teaching_classes(self, keyword, **kwargs):
+                raise ServerBusy("在线人数超过上限")
+
+        cfg = make_config([WatchTarget(name="课")], max_consecutive_errors=2)
+        stats, events, _ = run_poller(AlwaysBusyClient([{"课": []}]), cfg, max_rounds=5)
+
+        # 没有因此触发 fatal
+        assert "fatal" not in event_names(events)
+        assert stats.errors == 0
+        assert stats.rate_limited == 5
+
+    def test_启动阶段遇到_busy_会退避重试(self):
+        """登录/取学生信息阶段被 busy 挡住时，不能直接判失败。"""
+        from bitxk.exceptions import ServerBusy
+
+        class BusyStartupClient(FakeClient):
+            def __init__(self):
+                super().__init__([{"课": [("1001", 5, "")]}])
+                self.info_calls = 0
+
+            def student_info(self, student_code=""):
+                self.info_calls += 1
+                if self.info_calls < 3:
+                    raise ServerBusy("在线人数超过上限，请稍后再试！")
+                return super().student_info(student_code)
+
+        client = BusyStartupClient()
+        cfg = make_config([WatchTarget(name="课")])
+        cfg.notify.stop_on_success = True
+        stats, events, _ = run_poller(client, cfg)
+
+        assert client.info_calls == 3
+        assert "fatal" not in event_names(events)
+        assert stats.successes == 1
+
+    def test_启动阶段_busy_持续超限才失败(self):
+        from bitxk.exceptions import ServerBusy
+
+        class PermanentlyBusyClient(FakeClient):
+            def student_info(self, student_code=""):
+                raise ServerBusy("在线人数超过上限")
+
+        cfg = make_config([WatchTarget(name="课")])
+        stats, events, _ = run_poller(PermanentlyBusyClient([{"课": []}]), cfg)
+        assert "fatal" in event_names(events)
