@@ -33,7 +33,7 @@ class TestLoadConfig:
         assert cfg.password == "secret"
         assert len(cfg.courses) == 1
         assert cfg.courses[0].name == "科幻文学"
-        assert cfg.courses[0].type == CourseType.PUBLIC
+        assert cfg.courses[0].type == CourseType.XGXK
 
     def test_默认值合理(self, tmp_path):
         cfg = load_config(write_config(tmp_path, MINIMAL))

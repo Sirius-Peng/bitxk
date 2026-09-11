@@ -44,6 +44,7 @@
 | 登录态持久化 | 会话缓存到本地（权限 `600`），重启后优先复用，失效自动重登 |
 | 课程余量轮询 | 按配置间隔查询教学班余量，带随机抖动 |
 | 自动选课 | 一旦出现余量**立即**提交选课，按课程优先级排序 |
+| 异步结果确认 | 选课接口是「受理制」，提交后会轮询状态接口确认真实成败 |
 | 多课程并发 | 多门课共享一个全局限速器，不会因为课多就把请求打爆 |
 | 智能退避 | 被限流时冷却并自动放大间隔；网络抖动指数退避重试 |
 | 失效自愈 | Token 过期自动重新登录并继续，无需人工干预 |
@@ -63,44 +64,93 @@
 GET  https://sso.bit.edu.cn/cas/login?service=<选课系统 casLogin>
        HTML 里藏着：
          login-croypto        -> base64 字符串，作为 AES 密钥
-         login-page-flowkey   -> 作为 execution
+         login-page-flowkey   -> 作为 execution（服务端加密 JWT，必须逐字节原样回填）
 POST 同一 URL（application/x-www-form-urlencoded）
        username / password(密文) / execution / croypto /
-       captcha_code / _eventId=submit / type=UsernamePassword
-       └─ 302 回跳 → https://xk.bit.edu.cn/xsxkapp/.../bitXsxkLogin/casLogin.do?bitXsxkLogin=<key>
+       captcha_code / captcha_payload / _eventId=submit / type=UsernamePassword
+       └─ 成功返回 302，Location 带 ?ticket=ST-xxx
+GET  Location（回打选课系统的 casLogin.do 完成换票）
+       └─ 跳转链某一跳带 ?bitXsxkLogin=<key>
 GET  .../student/register.do?number=<key>
-       └─ {"data": {"token": "...", "name": "..."}}   ← 之后所有请求带 header `Token`
+       └─ {"data": {"token": "...", "name": "..."}}   ← 之后所有请求带全小写 header `token`
 ```
+
+> 实现注意：POST 必须用 `allow_redirects=False` —— ticket 就在 302 的 `Location` 里，
+> 自动跟随会把这个响应丢掉。另外**一个 SESSION 只能发一次登录 POST**，
+> 失败必须丢弃整个会话重建（第二次会得到 `1320007`）。
 
 密码加密（`bitxk/auth.py`）：
 
-- `ecb`（**默认**，当前 BIT 在用）：`AES-ECB`，`key = base64decode(login-croypto)`，PKCS#7 填充，密文再 base64。
+- `ecb`（**默认**，当前 BIT 在用）：`AES-128-ECB`，`key = base64decode(login-croypto)`
+  （恰好 16 字节），**无 IV**、**明文就是口令原文**（不加随机前缀）、PKCS#7 填充，密文再 base64。
+  该结论来自对生产前端 bundle 的源码级确认，非猜测。
 - `cbc`（旧版 wisedu，部分学校仍在用）：`AES-128-CBC`，明文 = 64 位随机串 + 密码，`iv` = 16 位随机串。
   若登录页出现 `pwdEncryptSalt` 而非 `login-croypto`，工具会自动切到该模式；也可用 `--encrypt-mode cbc` 手动指定。
 
 ### 2. 业务接口
 
-所有业务请求都在 `https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/` 下，鉴权靠 header `Token`。
+所有业务请求都在 `https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/` 下，鉴权靠 **全小写 header `token`**（另发 `language`）。
 
 | 用途 | 端点 |
 |---|---|
 | 换取 Token | `student/register.do?number=<key>` |
-| 学生信息 / 批次列表 | `student/xkxf.do`（降级 `elective/studentstatus.do`） |
+| 学生信息 / 批次列表 / 校区码 | `student/<学号>.do` |
 | 校公选课查询 | `elective/publicCourse.do` |
-| 方案内 / 体育课查询 | `elective/programCourse.do` |
-| **提交选课** | `elective/volunteer.do` |
-| 已选课程 | `elective/course.do` |
+| 推荐课程查询 | `elective/recommendedCourse.do` |
+| 方案内 / 方案外 / 重修 / 体育 / 辅修 | `elective/programCourse.do` |
+| 全校课程 | `elective/course.do` |
+| **提交选课 / 退选** | `elective/volunteer.do` |
+| **查询处理结果** | `elective/studentstatus.do` |
+| 服务端权威的"能不能选" | `util/canchoose.do` |
 
-这套系统的参数传递方式比较特别：查询参数是一个 **JSON 字符串**，直接放进 URL 的 query string：
+参数以 **POST 表单体**发送，值是一个 JSON 字符串：
 
 ```
 POST .../elective/publicCourse.do
-     ?querySetting={'data':{'studentCode':'...','electiveBatchCode':'...',
-                            'teachingClassType':'XGXK','checkCapacity':'0',
-                            'queryContent':'科幻文学'},'pageSize':'50','pageNumber':'0','order':''}
+Content-Type: application/x-www-form-urlencoded
+token: <全小写>
+language: zh_cn
+
+querySetting={"data":{"studentCode":"...","campus":"...","electiveBatchCode":"...",
+              "isMajor":"1","teachingClassType":"XGXK","checkCapacity":"2",
+              "queryContent":"科幻文学"},"pageSize":"10","pageNumber":"0","order":""}
 ```
 
-**关键细节**：轮询时必须用 `checkCapacity='0'`。若用 `'1'`（只返回有余量的课），满员时课程列表会直接为空，你就无法观察余量变化，也就无法在有人退课的瞬间发现它。
+三个容易踩的细节：
+
+- **`checkCapacity` 必须用 `"2"`**。`"1"` 会把满员课直接过滤掉，列表里根本看不到目标课，
+  也就永远发现不了"有人退课"这件事；`"2"` 是"校验但不过滤"，满员课仍在列表里带 `isFull='1'`。
+- **余量没有现成字段**。接口只给 `classCapacity`（容量）和已选人数，剩余量要自己算：
+  `剩余 = classCapacity - 已选人数`。`dataList[]` 顶层用 `numberOfFirstVolunteer`（只算第一志愿），
+  `tcList[]` 子项用 `numberOfSelected`（已选总数）。判满优先信任服务端的 `isFull == '1'`。
+- **`campus` 不是常量**，取自 `student/<学号>.do`；写死会把其他校区的课查漏。
+
+### 2.1 选课是异步的
+
+这是最容易实现错的一点：
+
+```
+POST elective/volunteer.do           → code == "1"  仅表示「已受理」，结果未定
+  └─ 轮询 elective/studentstatus.do  → code == "1"   ✅ 选课成功
+                                       code == "-1"  ❌ 选课失败（真实原因在 msg）
+                                       其它          ⏳ 仍在处理，1 秒后重试，最多 10 次
+```
+
+前端就是这么做的（`initProcessInterval` + `queryOperateProcess`）。所以本工具的
+`SelectionResult` 区分了三种"还没定论"的状态：`ACCEPTED`（已受理）、
+`PENDING`（轮询超时，**不等于失败**）、`SUCCESS`（已确认）。
+
+### 2.2 token 失效有三种形态
+
+实测都得处理，只看状态码会漏：
+
+| 形态 | 场景 |
+|---|---|
+| HTTP **302** → `Location: .../*default/index.do` | 带着首页 cookie 请求时最常见 |
+| HTTP **401** + `text/html` `Not login!` | 无 cookie 时的网关响应 |
+| HTTP **200** + 应用首页 HTML | `requests` 自动跟完 302 后的落点 |
+
+因此客户端一律**先判状态码、再按内容特征判定**，绝不直接 `resp.json()`。
 
 ### 3. 轮询决策
 
@@ -220,14 +270,21 @@ priority = 50            # 更想上体育课，所以优先级更高
 
 ### `type` 取值
 
+共 8 种，与选课系统页面上的 Tab 一一对应：
+
 | 值 | 含义 | 查询接口 |
 |---|---|---|
 | `XGXK` | 校公选课 | `publicCourse.do` |
 | `TYKC` | 体育课程 | `programCourse.do` |
-| `FANKC` | 培养方案内课程 | `programCourse.do` |
-| `TJKC` | 系统推荐课程 | `programCourse.do` |
-| `XGKC` | 专业课 / 跨专业 | `programCourse.do` |
-| `TJK` | 通识课 | `programCourse.do` |
+| `FANKC` | 方案内课程 | `programCourse.do` |
+| `FAWKC` | 方案外课程 | `programCourse.do` |
+| `CXKC` | 重修课程 | `programCourse.do` |
+| `FXKC` | 辅修课程 | `programCourse.do`（唯一 `isMajor='0'`） |
+| `TJKC` | 推荐课程 | `recommendedCourse.do` |
+| `QXKC` | 全校课程 | `course.do` |
+
+> 注意**体育课没有独立端点** —— 它和方案内/方案外/重修/辅修共用 `programCourse.do`，
+> 由服务端按 body 里的 `teachingClassType` 分流。
 
 写错 `type` 会导致查不到课却看不出原因，所以工具在启动时会校验并直接报错。
 
@@ -257,6 +314,7 @@ bitxk grab -v                  输出调试日志
 --encrypt-mode ecb|cbc SSO 密码加密模式
 --cookie '...'         手动导入 Cookie
 --token  '...'         手动导入 Token
+--student-code <学号>  手动导入模式必填（批次接口形如 student/<学号>.do）
 ```
 
 退出码：`0` 成功 / `1` 未抢到 / `2` 登录失败 / `3` 不在选课时间 / `4` 配置错误 / `5` 其它错误。
@@ -275,8 +333,13 @@ bitxk grab -v                  输出调试日志
 4. 运行：
 
 ```bash
-bitxk grab --token 'xxxxx' --cookie 'JSESSIONID=...; route=...'
+bitxk grab --student-code '1120200001' \
+           --token 'xxxxx' \
+           --cookie 'JSESSIONID=...; route=...; _WEU=...'
 ```
+
+`--student-code` 在手动导入模式下是**必需**的：批次接口是 `student/<学号>.do`，
+没有学号就无法确定该请求哪个地址。
 
 `--token` 也支持直接粘贴 CAS 回跳后地址栏里带 `bitXsxkLogin=` 的完整 URL，工具会自动提取。
 
@@ -316,6 +379,17 @@ bitxk grab --token 'xxxxx' --cookie 'JSESSIONID=...; route=...'
 
 大概率是容量字段命名与预期不同。用 `-v` 跑一次，日志里会打印原始响应字段；`TeachingClass` 会记录 `capacity_source` 说明它是从哪个字段推出来的。请带日志提 issue。
 
+### 一直卡在「已受理待确认」
+
+正常现象，说明选课请求已被系统受理、后台正在排队处理。工具会自动轮询
+`studentstatus.do` 确认结果。若最终显示「结果未知」，**不代表失败** ——
+后台可能仍在处理，下一轮查询课程列表时看到「已选」就说明成功了。
+
+### 提交后返回「时间冲突」但我不觉得冲突
+
+以服务端的判定为准（它掌握你的完整课表，包括其他批次的课）。
+也可以运行 `bitxk list` 看该教学班的 `status` 是否已被标为「冲突」。
+
 ### 抢到了但我不想要
 
 本工具不做退课，请去选课系统页面手动退。另外建议先 `--dry-run` 试跑确认匹配逻辑符合预期。
@@ -345,7 +419,7 @@ bitxk/
 ├── notify.py         响铃与系统通知
 └── exceptions.py     分层异常
 
-tests/                163 个测试，全部用假 HTTP 层，不发真实请求
+tests/                271 个测试，全部用假 HTTP 层，不发真实请求
 ```
 
 ---
@@ -364,6 +438,18 @@ python -m pytest -q -k poller  # 只跑轮询引擎测试
 2. **容量字段不写死。** 选课系统不同版本的字段名不一致（`remainCapacity` / `rl` / `remainNumber` …），`models.py` 用候选键匹配 + 多路推断，并通过 `capacity_source` 暴露推断依据，便于排错。
 
 ---
+
+## 研究文档
+
+`docs/research/` 下保留了完整的逆向分析记录，改动协议相关代码前建议先读：
+
+| 文件 | 内容 |
+|---|---|
+| `xsxkapp-api-contract.md` | `xsxkapp` 全部接口的参数/响应 schema、8 种课程类型、余量字段定位、异步提交语义 |
+| `bit-sso-login-contract.md` | 统一身份认证的请求契约、加密算法源码证据、失败模式清单 |
+| `xsxkapp-reference-client.py` | 独立实现的参考骨架，可用于交叉验证 |
+
+这些文档里的每条结论都标注了来源与可信度，未验证的推测也明确列在"不确定性"一节。
 
 ## 参考资料
 

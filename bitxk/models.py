@@ -78,6 +78,7 @@ class CourseStatus(str, Enum):
     FULL = "full"  # 已满（需要轮询等待）
     SELECTED = "selected"  # 已经选过
     CONFLICT = "conflict"  # 与已选课程时间冲突
+    QUEUED = "queued"  # 队列处理中，暂不可提交
     UNKNOWN = "unknown"  # 信息不足，无法判断
 
     @property
@@ -87,6 +88,7 @@ class CourseStatus(str, Enum):
             CourseStatus.FULL: "已满",
             CourseStatus.SELECTED: "已选",
             CourseStatus.CONFLICT: "冲突",
+            CourseStatus.QUEUED: "队列中",
             CourseStatus.UNKNOWN: "未知",
         }[self]
 
@@ -114,11 +116,10 @@ class TeachingClass:
     """剩余容量（核心指标，轮询看的就是它）。"""
 
     capacity_source: str = "unknown"
-    """``remaining`` 的来源，取值：``remaining`` / ``capacity`` / ``derived`` / ``unknown``。
+    """``remaining`` 的来源，取值：``remaining`` / ``derived`` / ``unknown``。
 
-    - ``remaining``：响应里直接给了剩余数；
-    - ``capacity``：响应里给的是「可选人数/容量」语义的字段；
-    - ``derived``：由 容量 - 已选 推算；
+    - ``remaining``：响应里直接给了剩余数（少见）；
+    - ``derived``：由 ``classCapacity - 已选人数`` 推算（**本系统的常态**）；
     - ``unknown``：没拿到容量信息。
     """
 
@@ -163,10 +164,55 @@ class TeachingClass:
         return obj
 
     def _infer_capacity(self) -> None:
-        """多路推断容量信息。字段名不统一，所以按语义分组尝试。"""
-        remaining = _as_int(
+        """推断容量信息。
+
+        重要：这套接口**没有任何 ``remaining`` 字段**，剩余量是前端算出来的::
+
+            剩余 = classCapacity - numberOfFirstVolunteer
+
+        ``dataList[]`` 顶层项用 ``numberOfFirstVolunteer``（只统计第一志愿），
+        ``tcList[]`` 子项用 ``numberOfSelected``（已选总数，所有志愿合计）。
+        两者语义不同不能混用，所以这里按「当前字典里实际存在哪个字段」来选。
+
+        结论来自对生产前端 ``grablessons.js`` 的源码分析，不是猜测。
+        """
+        raw = self.raw
+
+        capacity = _as_int(
             _pick(
-                self.raw,
+                raw,
+                "classCapacity",
+                "capacity",
+                "totalCapacity",
+                "limitCount",
+                "maxCount",
+                "number",
+                "rl",
+                "zrs",
+                "total",
+                "limit",
+            )
+        )
+
+        # 已选人数：优先「已选总数」，退化到「第一志愿人数」
+        selected = _as_int(
+            _pick(
+                raw,
+                "numberOfSelected",
+                "numberOfFirstVolunteer",
+                "selectedCount",
+                "selectedNumber",
+                "selectedNum",
+                "chosenCount",
+                "yxrs",
+                "selected",
+            )
+        )
+
+        # 极少数接口版本直接给剩余量；真给到就优先信任
+        direct_remaining = _as_int(
+            _pick(
+                raw,
                 "remainCapacity",
                 "remainingCapacity",
                 "remainNumber",
@@ -181,73 +227,53 @@ class TeachingClass:
                 "kyl",
             )
         )
-        capacity = _as_int(
-            _pick(
-                self.raw,
-                "capacity",
-                "totalCapacity",
-                "classCapacity",
-                "limitCount",
-                "maxCount",
-                "number",
-                "rl",
-                "zrs",
-                "total",
-                "limit",
-            )
-        )
-        selected = _as_int(
-            _pick(
-                self.raw,
-                "selectedCount",
-                "selectedNumber",
-                "selectedNum",
-                "electiveNumber",
-                "chosenCount",
-                "yxrs",
-                "selected",
-                "yxzrs",
-            )
-        )
-
-        if remaining is not None:
-            self.remaining, self.capacity_source = remaining, "remaining"
-        elif capacity is not None:
-            # 有的接口把「可选人数」直接放在 capacity 语义字段里，
-            # 此时若同时给了已选人数就可以推算。
-            if selected is not None:
-                self.remaining, self.capacity_source = capacity - selected, "derived"
-            else:
-                self.remaining, self.capacity_source = capacity, "capacity"
-        else:
-            self.remaining, self.capacity_source = None, "unknown"
 
         self.capacity = capacity
         self.selected_count = selected
 
-        # 有些接口用 capacity 表示上限、用另一个字段表示已选，
-        # 上面若没取到上限，用 已选 + 剩余 反推一个，方便展示 "x/y"。
-        if self.capacity is None and self.remaining is not None and selected is not None:
-            self.capacity = self.remaining + selected
-            if self.capacity_source == "remaining":
-                self.capacity_source = "derived"
+        if direct_remaining is not None:
+            self.remaining, self.capacity_source = direct_remaining, "remaining"
+        elif capacity is not None and selected is not None:
+            self.remaining, self.capacity_source = capacity - selected, "derived"
+        else:
+            self.remaining, self.capacity_source = None, "unknown"
 
     def _infer_status(self) -> None:
-        """推断可选状态。优先信任接口显式给出的标记字段。"""
-        if _as_bool(_pick(self.raw, "isSelected", "selectedFlag", "yxb", "hasSelected")):
+        """推断可选状态。
+
+        判定优先级完全对齐生产前端：服务端给出的布尔标志
+        （``isFull`` / ``isChoose`` / ``isConflict``）**比我们自己算的数字更权威** ——
+        志愿制轮次下人数统计口径可能与最终录取口径不同。
+        """
+        raw = self.raw
+
+        # 1) 已选 / 冲突 —— 服务端标志优先
+        if _as_bool(_pick(raw, "isChoose", "isSelected", "selectedFlag", "hasSelected")):
             self.status = CourseStatus.SELECTED
             return
-        if _as_bool(_pick(self.raw, "isConflict", "conflictFlag", "ctFlag")):
+        if _as_bool(_pick(raw, "isConflict", "conflictFlag", "ctFlag")):
             self.status = CourseStatus.CONFLICT
             return
 
-        text = " ".join(str(v) for v in self.raw.values() if isinstance(v, (str, int, float)))
+        # 2) 队列处理中：此时提交会被拒绝，视作不可选
+        if _as_bool(_pick(raw, "inQuene", "inQueue")):
+            self.status = CourseStatus.QUEUED
+            return
+
+        # 3) 已满 —— isFull 是服务端算好的，最可靠
+        if _as_bool(_pick(raw, "isFull")):
+            self.status = CourseStatus.FULL
+            return
+
+        # 4) 退化到文本与数值判断
+        text = " ".join(str(v) for v in raw.values() if isinstance(v, (str, int, float)))
         if any(word in text for word in ("已选", "已选中", "已经选")):
             self.status = CourseStatus.SELECTED
             return
-        if any(word in text for word in ("冲突",)):
+        if "冲突" in text:
             self.status = CourseStatus.CONFLICT
             return
+
         if self.remaining is None:
             self.status = CourseStatus.UNKNOWN
         elif self.remaining > 0:
@@ -355,9 +381,23 @@ class Batch:
 
 
 class SelectionOutcome(str, Enum):
-    """一次选课提交的结果分类。"""
+    """一次选课提交的结果分类。
 
-    SUCCESS = "success"  # 选上了
+    必须区分三个"还没定论"的状态：
+
+    * ``ACCEPTED`` —— 接口已受理（``volunteer.do`` 返回 ``code=='1'``），
+      后台仍在处理；
+    * ``PENDING``  —— 已受理但轮询超时，结果未知，**不等于失败**
+      （后台可能仍在处理，下次轮询课程列表即可确认）；
+    * ``SUCCESS``  —— 已轮询 ``studentstatus.do`` 并确认成功。
+
+    这套系统的选课是**异步**的，所以三者必须分开表达，
+    否则会把"还在处理"误报成"抢到了"或"失败了"。
+    """
+
+    SUCCESS = "success"  # 已确认选上
+    ACCEPTED = "accepted"  # 请求已受理，结果未定
+    PENDING = "pending"  # 受理后轮询超时，结果未知
     FULL = "full"  # 容量已满（继续轮询）
     CONFLICT = "conflict"  # 时间冲突（轮询无意义）
     ALREADY = "already"  # 已经选过
@@ -370,6 +410,8 @@ class SelectionOutcome(str, Enum):
     def label(self) -> str:
         return {
             SelectionOutcome.SUCCESS: "选课成功",
+            SelectionOutcome.ACCEPTED: "已受理待确认",
+            SelectionOutcome.PENDING: "结果未知",
             SelectionOutcome.FULL: "容量已满",
             SelectionOutcome.CONFLICT: "时间冲突",
             SelectionOutcome.ALREADY: "已经选过",
@@ -388,6 +430,11 @@ class SelectionOutcome(str, Enum):
             SelectionOutcome.ERROR,
             SelectionOutcome.NOT_IN_BATCH,
         }
+
+    @property
+    def is_settled(self) -> bool:
+        """是否已有明确结论（不需要再等）。"""
+        return self in {SelectionOutcome.SUCCESS, SelectionOutcome.ALREADY}
 
 
 @dataclass

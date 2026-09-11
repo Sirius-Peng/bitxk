@@ -109,7 +109,7 @@ class WatchTarget:
     """一门要盯的课程。"""
 
     name: str
-    type: str = CourseType.PUBLIC
+    type: str = CourseType.XGXK
     priority: int = 100
     teachers: list[str] = field(default_factory=list)
     classes: list[str] = field(default_factory=list)
@@ -119,7 +119,7 @@ class WatchTarget:
         self.name = (self.name or "").strip()
         if not self.name:
             raise ConfigError("courses.name 不能为空")
-        self.type = (self.type or CourseType.PUBLIC).strip().upper()
+        self.type = (self.type or CourseType.XGXK).strip().upper()
         if self.type not in CourseType.ALL:
             raise ConfigError(
                 f"课程「{self.name}」的 type={self.type} 非法，可选值：{', '.join(CourseType.ALL)}"

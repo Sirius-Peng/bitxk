@@ -50,7 +50,13 @@ class FakeClient:
         self.submits: list[str] = []
         self.batch_calls = 0
 
-    def current_batch(self):
+    def student_info(self, student_code=""):
+        return {"name": "张三", "number": student_code or "1120200001", "campus": "2"}
+
+    def bind(self, *, student_code="", campus=""):
+        self.bound = {"student_code": student_code, "campus": campus}
+
+    def current_batch(self, student_code=""):
         self.batch_calls += 1
         return Batch(code="B1", name="第一轮", can_select=True, school_term="2024-2025-1")
 
@@ -85,9 +91,6 @@ class FakeClient:
             message="选课成功",
             teaching_class_id=teaching_class_id,
         )
-
-    def student_info(self):
-        return {"name": "张三"}
 
 
 class RoundAdvancingClient(FakeClient):
@@ -510,7 +513,7 @@ class TestBatchUnavailable:
         from bitxk.exceptions import NotInBatchError
 
         class NoBatchClient(FakeClient):
-            def current_batch(self):
+            def current_batch(self, student_code=""):
                 raise NotInBatchError("当前不在可选课时间内")
 
         cfg = make_config([WatchTarget(name="课")])

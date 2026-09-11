@@ -107,11 +107,17 @@ class HttpClient:
             self.session.cookies.set(key, val)
 
     def set_token(self, token: str | None) -> None:
+        """设置选课系统登录 token。
+
+        header 名用**全小写 ``token``** —— 这是生产前端的写法
+        （HTTP 头名本就大小写不敏感，但保持一致能少一类排查噪音）。
+        同时清掉历史上可能残留的大写形式。
+        """
         self.token = token
+        for name in ("Token", "token"):
+            self.session.headers.pop(name, None)
         if token:
-            self.session.headers["Token"] = token
-        else:
-            self.session.headers.pop("Token", None)
+            self.session.headers["token"] = token
 
     # ------------------------------------------------------------ 请求
 

@@ -197,14 +197,31 @@ class Poller:
     # ================================================================ 启动
 
     def _bootstrap(self) -> None:
-        """登录（若还没登录）并确定当前批次。"""
+        """登录（若还没登录）→ 绑定学号/校区 → 确定当前批次。"""
         if self.session is None:
             self._login()
         assert self.session is not None
         self.http.set_token(self.session.token)
         self.student_code = self.session.student_code or self.config.username
 
-        batch = self.client.current_batch()
+        # 校区码与学号都必须来自学生信息接口，不能用常量：
+        # campus 写错会把其他校区的课查漏，学号决定 student/<学号>.do 的路径。
+        info = self.client.student_info(self.student_code)
+        campus = str(info.get("campus") or info.get("campusCode") or "")
+        name = str(info.get("name") or self.session.student_name or "")
+        number = str(info.get("number") or info.get("code") or self.student_code)
+        self.student_code = number or self.student_code
+        self.client.bind(student_code=self.student_code, campus=campus)
+        if name:
+            self.session.student_name = name
+        self._emit(
+            "student",
+            name=name,
+            code=self.student_code,
+            campus=campus,
+        )
+
+        batch = self.client.current_batch(self.student_code)
         self.batch_code = batch.code
         self._emit("batch", batch=str(batch))
 
@@ -404,6 +421,20 @@ class Poller:
             )
             return True
 
+        if outcome in (SelectionOutcome.ACCEPTED, SelectionOutcome.PENDING):
+            # 选课是异步的：接口已受理但还没拿到终态。
+            # 绝不能当成成功（可能后台最终失败），也不能当成失败（可能已经选上）。
+            # 正确做法是把这门课标记为"待确认"，下一轮查询课程列表时
+            # isChoose 会告诉我们真相。
+            self._emit(
+                "pending",
+                course=state.target.name,
+                class_id=tc.teaching_class_id,
+                outcome=outcome.value,
+                message=result.message,
+            )
+            return False
+
         if outcome is SelectionOutcome.CONFLICT:
             # 时间冲突不会因为等待而消失，记在黑名单里，避免每轮重复提交
             state.conflicted.add(tc.teaching_class_id)
@@ -449,7 +480,7 @@ class Poller:
             return
 
         try:
-            batch = self.client.current_batch()
+            batch = self.client.current_batch(self.student_code)
             if batch.code != self.batch_code:
                 self.batch_code = batch.code
                 self._emit("batch", batch=str(batch))

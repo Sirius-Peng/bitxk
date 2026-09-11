@@ -167,6 +167,12 @@ def _add_common_options(parser: argparse.ArgumentParser, *, prefixed: bool = Fal
         default=None,
         help="最长运行秒数，0 表示不限（覆盖配置）",
     )
+    parser.add_argument(
+        "--student-code",
+        dest=dest("student_code"),
+        default=None,
+        help="学号。手动导入登录态（--token）时必填，因为批次接口形如 student/<学号>.do",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -219,7 +225,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _merge_common(args) -> None:
     """把子命令上解析到的通用选项回填到主命名空间（子命令优先）。"""
-    for name in ("cookie", "token", "encrypt_mode", "dry_run", "interval", "duration"):
+    for name in (
+        "cookie",
+        "token",
+        "encrypt_mode",
+        "dry_run",
+        "interval",
+        "duration",
+        "student_code",
+    ):
         value = getattr(args, f"_{name}", None)
         if value not in (None, False):
             setattr(args, name, value)
@@ -289,7 +303,8 @@ def _manual_session(args, cfg: Config) -> Session | None:
     session = BitAuth.from_manual(
         token=args.token or "",
         cookie=args.cookie or "",
-        student_code=cfg.username,
+        # 手动导入时学号可能只出现在命令行里（config 的 account 段可以是空的）
+        student_code=getattr(args, "student_code", None) or cfg.username,
     )
     if not session.token:
         raise ConfigError(
@@ -314,6 +329,8 @@ def _connect(cfg: Config, args, *, need_login: bool = True) -> tuple[HttpClient,
     if manual is not None:
         http.cookies = manual.cookies
         http.set_token(manual.token)
+        if manual.student_code:
+            http.student_code = manual.student_code
         return http, XkClient(http), manual
 
     # 复用缓存会话（仅在未显式要求重新登录时）
@@ -521,8 +538,15 @@ def cmd_grab(args) -> int:
             http = _build_http(cfg)
             http.cookies = manual.cookies
             http.set_token(manual.token)
+            if manual.student_code:
+                http.student_code = manual.student_code
             client = XkClient(http)
             session = manual
+            if not manual.student_code:
+                log_warn(
+                    "手动导入模式未提供学号，将无法查询批次。"
+                    "请用 --student-code 指定，或在 config.toml 里填 username。"
+                )
             log_ok("已使用手动导入的登录态")
         else:
             http, client, session = _connect(cfg, args)

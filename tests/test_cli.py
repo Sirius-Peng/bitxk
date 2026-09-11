@@ -235,6 +235,15 @@ class TestManualSession:
         args = cli.parse_args(["grab"])
         assert cli._manual_session(args, Config()) is None
 
+    def test_学号可通过命令行提供(self):
+        """手动导入模式下 config 的 account 段可以是空的，学号得能从命令行来。"""
+        from bitxk.config import Config
+
+        args = cli.parse_args(["grab", "--token", "tok", "--student-code", "1120200001"])
+        session = cli._manual_session(args, Config())
+        assert session is not None
+        assert session.student_code == "1120200001"
+
     def test_回跳_url_也能被接受(self):
         from bitxk.config import Config
 
