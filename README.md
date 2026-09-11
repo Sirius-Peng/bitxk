@@ -23,8 +23,8 @@
 
 - [免责声明](#免责声明)
 - [功能](#功能)
-- [图形界面](#图形界面)
 - [它到底是怎么工作的](#它到底是怎么工作的)
+- [图形界面](#图形界面)
 - [安装](#安装)
 - [快速开始](#快速开始)
 - [配置说明](#配置说明)
@@ -35,9 +35,9 @@
 - [故障排查](#故障排查)
 - [项目结构](#项目结构)
 - [开发](#开发)
+- [研究文档](#研究文档)
 - [参考资料](#参考资料)
-
----
+- [许可证](#许可证)
 
 ## 免责声明
 
@@ -304,24 +304,55 @@ bitxk gui
 
 ## 安装
 
+### 方式一：下载现成的发行版（推荐，不用装 Python）
+
+到 [Releases](../../releases) 页面下载对应平台的文件：
+
+| 平台 | 文件 | 说明 |
+|---|---|---|
+| Windows | `BIT-Course-Helper-0.1.0-windows-x64.zip` | 解压后双击 `bitxk-gui.exe` |
+| macOS | `BIT-Course-Helper-0.1.0-macos.zip` | 解压后双击 `BIT-Course-Helper.app` |
+
+两个包里都含两份可执行文件：
+
+* `bitxk-gui` —— **双击就用**，打开图形界面，不会弹黑框；
+* `bitxk` —— 命令行版本，给脚本 / 计划任务 / 终端用户。
+
+> **macOS 首次打开提示"无法验证开发者"**：这是未签名应用的正常提示。
+> 右键点图标 → 选「打开」→ 再确认一次即可；或执行
+> `xattr -dr com.apple.quarantine /Applications/BIT-Course-Helper.app`。
+>
+> **Windows SmartScreen 拦截**：点「更多信息」→「仍要运行」。
+
+### 方式二：从源码安装
+
 需要 **Python ≥ 3.11**（用到标准库 `tomllib`）。图形界面用 Python 自带的
 `tkinter`，**不需要额外安装任何东西**。
 
 ```bash
 git clone <本仓库地址> bitxk && cd bitxk
 
-# 方式一：装成命令（推荐）
+# 装成命令（推荐）
 pip install -e .
 
-# 方式二：只装依赖，用 python -m bitxk 运行
+# 或只装依赖，用 python -m bitxk 运行
 pip install -r requirements.txt
 python -m bitxk --help
 ```
 
 依赖只有三个：`requests`、`pycryptodome`、`websockets`
-（最后一个是用来通过 CDP 驱动浏览器的，只需要几十 KB）。
+（最后一个用来通过 CDP 驱动浏览器，只需要几十 KB）。
 
----
+### 方式三：自己打包
+
+```bash
+pip install pyinstaller
+pyinstaller --clean --noconfirm packaging/bitxk.spec
+# 产物在 dist/ 下
+```
+
+Windows 上还可以直接右键运行 `packaging/build-windows.ps1`，
+它会自动建虚拟环境、装依赖、打包并打成 zip。
 
 ## 快速开始
 

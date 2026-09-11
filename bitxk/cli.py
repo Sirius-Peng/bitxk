@@ -303,19 +303,44 @@ def _setup_logging(args) -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+def _safe_getpass(prompt: str) -> str:
+    """安全地读密码。
+
+    ``getpass`` 在非终端环境（管道、重定向、部分 CI）会直接抛 OSError / EOFError，
+    而不是优雅降级。这里兜住，避免"只是重定向了输出"就让整个程序崩掉。
+    """
+    try:
+        return _getpass(prompt)
+    except (OSError, EOFError, AttributeError):
+        logger.debug("getpass 不可用，改用普通读取")
+        try:
+            return input(prompt)
+        except EOFError:
+            return ""
+
+
 def _resolve_credentials(cfg: Config, args) -> None:
     """按 命令行 > 环境变量 > 配置文件 > 交互输入 的优先级确定账号密码。"""
+    # 浏览器登录 / 手动导入都不需要密码，绝不能在这里拦一道
+    if _use_browser_login(args) or getattr(args, "token", None) or getattr(args, "cookie", None):
+        if args.username:
+            cfg.username = args.username
+        return
+
     if args.username:
         cfg.username = args.username
     if args.password:
         cfg.password = args.password
 
     if cfg.username and not cfg.password:
-        cfg.password = _getpass(f"请输入 {cfg.username} 的密码：")
+        cfg.password = _safe_getpass(f"请输入 {cfg.username} 的密码：")
     elif not cfg.username:
-        cfg.username = input("请输入学号：").strip()
+        try:
+            cfg.username = input("请输入学号：").strip()
+        except EOFError:
+            cfg.username = ""
         if cfg.username and not cfg.password:
-            cfg.password = _getpass("请输入密码：")
+            cfg.password = _safe_getpass("请输入密码：")
 
 
 def _build_http(cfg: Config) -> HttpClient:
@@ -597,7 +622,15 @@ def cmd_list_browsers(args) -> int:
 
 def cmd_browser_login(args) -> int:
     """浏览器登录一次，把登录态存下来。"""
+    # 这个子命令本身就意味着"用浏览器登录"，不必再让用户加 --browser。
+    # 空串是与 --browser 不带值相同的语义：用自动检测到的浏览器。
+    if getattr(args, "browser", None) is None:
+        args.browser = ""
+
     cfg = load_config(args.config)
+    # 浏览器登录不需要账号密码；学号可选（给了就能顺手校验学籍）
+    if getattr(args, "student_code", None):
+        cfg.username = args.student_code
     cfg.validate(require_account=False)
 
     http, client, session = _connect(cfg, args)
