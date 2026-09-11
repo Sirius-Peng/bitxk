@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller 打包配置。
+"""PyInstaller 打包配置 —— 精简命令行版（不含图形界面）。
 
 一份 spec 同时产出两个可执行文件，覆盖两类用户：
 
@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(SPECPATH).parent
 IS_WINDOWS = sys.platform.startswith("win")
 IS_MACOS = sys.platform == "darwin"
 
-APP_NAME = "BIT-Course-Helper"
+APP_NAME = "BIT-Course-Helper-cli"
 VERSION = "0.1.0"
 
 # tkinter 不会自动被收全（尤其 ttk 的主题资源），显式声明。
@@ -80,6 +80,8 @@ excludes = [
     "test", "unittest", "lib2to3", "pydoc", "doctest", "pdb",
     "sqlite3", "xmlrpc", "ftplib", "imaplib", "smtplib", "poplib",
     "tarfile", "curses", "distutils", "ensurepip", "venv",
+    # 图形界面相关（本版本刻意不含 GUI，约省 10MB）
+    "tkinter", "_tkinter", "Tkinter", "turtle", "turtledemo", "idlelib",
 ]
 
 block_cipher = None
@@ -125,31 +127,8 @@ exe_console = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
-
-# ---------------------------------------------------------------------------
-# 2) 图形界面版本：无控制台
-# ---------------------------------------------------------------------------
-exe_gui = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="bitxk-gui",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=True,
-    upx=False,
-    console=False,  # Windows 上双击不弹黑框
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
-
 coll = COLLECT(
     exe_console,
-    exe_gui,
     a.binaries,
     a.zipfiles,
     a.datas,
@@ -158,27 +137,3 @@ coll = COLLECT(
     upx_exclude=[],
     name=APP_NAME,
 )
-
-# ---------------------------------------------------------------------------
-# 3) macOS 额外产出 .app（双击即用）
-# ---------------------------------------------------------------------------
-if IS_MACOS:
-    app = BUNDLE(
-        exe_gui,
-        a.binaries,
-        a.zipfiles,
-        a.datas,
-        name=f"{APP_NAME}.app",
-        icon=None,
-        bundle_identifier="cn.edu.bit.bitxk.helper",
-        info_plist={
-            "CFBundleName": "BIT 选课助手",
-            "CFBundleDisplayName": "BIT 选课助手",
-            "CFBundleShortVersionString": VERSION,
-            "CFBundleVersion": VERSION,
-            "NSHighResolutionCapable": True,
-            "LSMinimumSystemVersion": "11.0",
-            # 需要联网访问校内外服务
-            "NSAppTransportSecurity": {"NSAllowsArbitraryLoads": True},
-        },
-    )

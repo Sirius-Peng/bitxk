@@ -588,7 +588,17 @@ def cmd_check(args) -> int:
 
 def cmd_gui(args) -> int:
     """启动图形界面。"""
-    from .gui import run_gui
+    try:
+        from .gui import run_gui
+    except ImportError as exc:
+        # 精简版发行包不带 tkinter，这里要给出人话提示而不是崩栈
+        log_err(f"这个版本没有图形界面支持（{exc}）。")
+        print()
+        print("请改用命令行：")
+        print("  bitxk browser-login   用浏览器登录")
+        print("  bitxk list            查看余量")
+        print("  bitxk grab            开始抢课")
+        return 4
 
     log("正在启动图形界面…（关闭窗口即退出）")
     return run_gui(args.config)

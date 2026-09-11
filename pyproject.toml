@@ -68,6 +68,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"packaging/entry.py" = ["E402"]  # 入口故意把导入放在分支里，保证没装 GUI 也能跑
 # 测试名刻意用中文（可读性优先）且会解包后只用一个返回值
 "tests/*" = ["RUF059", "F841"]
 

@@ -307,15 +307,37 @@ bitxk gui
 
 到 [Releases](../../releases) 页面下载对应平台的文件：
 
-| 平台 | 文件 | 说明 |
+| 平台 | 文件 | 解压后 |
 |---|---|---|
-| Windows | `BIT-Course-Helper-0.1.0-windows-x64.zip` | 解压后双击 `bitxk-gui.exe` |
-| macOS | `BIT-Course-Helper-0.1.0-macos.zip` | 解压后双击 `BIT-Course-Helper.app` |
+| Windows | `BIT-Course-Helper-0.1.0-windows-x64.zip` | 双击 `bitxk-gui.exe` |
+| macOS | `BIT-Course-Helper-0.1.0-macos.tar.gz` | 双击 `BIT-Course-Helper.app` |
 
-两个包里都含两份可执行文件：
+### 关于体积
 
-* `bitxk-gui` —— **双击就用**，打开图形界面，不会弹黑框；
-* `bitxk` —— 命令行版本，给脚本 / 计划任务 / 终端用户。
+发行包只有 20MB 出头，**因为它不包含浏览器内核**。
+
+「用浏览器登录」这个功能驱动的是你**本机已经装好的** Chrome / Edge / Chromium / Brave，
+工具通过 DevTools Protocol 连过去取登录态。所以：
+
+| 方案 | 包体积 |
+|---|---|
+| 打包 Playwright / Selenium（自带内核） | ~250MB |
+| **本工具（复用系统浏览器）** | **~24MB** |
+
+打包时还做了这些裁剪：
+
+- 排除了 `cryptography` / `bcrypt` / `cffi` —— 它们不是本项目的依赖，
+  只是恰好装在构建机上被 PyInstaller 顺手收了进来（省约 11MB）；
+- 排除了 `numpy` / `pandas` / `PIL` / 其它 GUI 框架 / 开发期工具；
+- 二进制符号表已 strip。
+
+如果你只要命令行、不需要图形界面，包里另附**精简版**（`BIT-Course-Helper-cli/`），
+去掉了 tkinter 与 Tcl/Tk，再小约 11MB。
+
+包内结构：
+
+* `BIT-Course-Helper.app`（Windows 上是 `bitxk-gui.exe`）—— **双击就用**，图形界面；
+* `BIT-Course-Helper-cli/`（Windows 上是 `bitxk.exe`）—— 命令行版，给脚本 / 计划任务。
 
 > **macOS 首次打开提示"无法验证开发者"**：这是未签名应用的正常提示。
 > 右键点图标 → 选「打开」→ 再确认一次即可；或执行
@@ -346,8 +368,14 @@ python -m bitxk --help
 
 ```bash
 pip install pyinstaller
+
+# 完整版（图形界面 + 命令行）
 pyinstaller --clean --noconfirm packaging/bitxk.spec
-# 产物在 dist/ 下
+
+# 精简命令行版（去掉 tkinter，小约 10MB）
+pyinstaller --clean --noconfirm packaging/bitxk-cli.spec
+
+# 产物都在 dist/ 下
 ```
 
 Windows 上还可以直接右键运行 `packaging/build-windows.ps1`，
@@ -670,6 +698,13 @@ bitxk/
 ├── config.py         TOML 配置加载与校验
 ├── notify.py         响铃与系统通知
 └── exceptions.py     分层异常
+
+packaging/
+├── entry.py            打包入口：无参数开 GUI，带参数走 CLI
+├── bitxk.spec          完整版打包配置
+├── bitxk-cli.spec      精简命令行版打包配置
+├── build-windows.ps1   Windows 一键构建脚本
+└── config.example.toml 发行包里的配置模板
 
 tests/                372 个测试；网络与浏览器默认全部打桩，
                       另有 3 项真实启动浏览器的用例（无浏览器时自动跳过）
