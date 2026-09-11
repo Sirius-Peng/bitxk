@@ -35,7 +35,6 @@
 - [故障排查](#故障排查)
 - [项目结构](#项目结构)
 - [开发](#开发)
-- [研究文档](#研究文档)
 - [参考资料](#参考资料)
 - [许可证](#许可证)
 
@@ -691,19 +690,15 @@ python -m pytest -q -k poller  # 只跑轮询引擎测试
 1. **业务失败不是异常。** 「容量已满」是轮询中的正常状态，用 `SelectionResult.outcome` 表达；只有「登录失效」「被限流」「网络故障」这类需要上层改变行为的才抛异常。
 2. **容量字段不写死。** 选课系统不同版本的字段名不一致（`remainCapacity` / `rl` / `remainNumber` …），`models.py` 用候选键匹配 + 多路推断，并通过 `capacity_source` 暴露推断依据，便于排错。
 
+改动与选课系统交互的代码（`client.py` / `auth.py` / `models.py`）时，请务必让
+`tests/` 里对应的契约测试保持通过 —— 它们逐条固化了实测到的接口行为，
+是防止改坏的主要防线：
+
+```bash
+python -m pytest tests/test_client.py tests/test_auth_contract.py -v
+```
+
 ---
-
-## 研究文档
-
-`docs/research/` 下保留了完整的逆向分析记录，改动协议相关代码前建议先读：
-
-| 文件 | 内容 |
-|---|---|
-| `xsxkapp-api-contract.md` | `xsxkapp` 全部接口的参数/响应 schema、8 种课程类型、余量字段定位、异步提交语义 |
-| `bit-sso-login-contract.md` | 统一身份认证的请求契约、加密算法源码证据、失败模式清单 |
-| `xsxkapp-reference-client.py` | 独立实现的参考骨架，可用于交叉验证 |
-
-这些文档里的每条结论都标注了来源与可信度，未验证的推测也明确列在"不确定性"一节。
 
 ## 参考资料
 

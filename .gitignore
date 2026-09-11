@@ -17,6 +17,12 @@ config.toml
 cookies.txt
 courses.txt
 
+# ---- 内部笔记：不入库 ----
+# 接口/登录流程的分析记录只作为本地参考，不随仓库分发。
+docs/research/
+docs/notes/
+*.internal.md
+
 # ---- 运行产物 ----
 *.log
 bitxk.log
