@@ -344,12 +344,33 @@ bitxk gui
 
 ### 方式一：下载现成的发行版（推荐，不用装 Python）
 
-到 [Releases](https://github.com/Sirius-Peng/bitxk/releases) 页面下载对应平台的文件：
+到 [Releases](https://github.com/Sirius-Peng/bitxk/releases) 页面按需下载：
 
-| 平台 | 文件 | 解压后 |
+**Windows**
+
+| 文件 | 大小 | 适合谁 |
 |---|---|---|
-| Windows | `BIT-Course-Helper-0.1.0-windows-x64.zip` | 双击 `bitxk-gui.exe` |
-| macOS | `BIT-Course-Helper-0.1.0-macos.tar.gz` | 双击 `BIT-Course-Helper.app` |
+| `BIT-Course-Helper-0.1.0-setup.exe` | 21 MB | **推荐。** 双击安装，自动建开始菜单与桌面快捷方式；**按用户安装，不需要管理员权限** |
+| `...-windows-portable-gui.exe` | 14 MB | 不想安装：单个 exe，双击即用图形界面 |
+| `...-windows-portable-cli.exe` | 14 MB | 不想安装、要用命令行：单个 exe，输出能正常打印 |
+| `...-windows-x64.zip` | 29 MB | 需要频繁跑命令行：解压后启动最快（0.1 秒，单文件版要 1.4 秒） |
+
+**macOS**
+
+| 文件 | 大小 | 适合谁 |
+|---|---|---|
+| `BIT-Course-Helper-0.1.0-macos.tar.gz` | 24 MB | 完整包：`.app`（双击开界面）+ 命令行版 |
+| `...-macos-portable-gui` | 13 MB | 单个可执行文件，直接双击开界面 |
+| `...-macos-portable-cli` | 13 MB | 单个可执行文件，命令行用（启动 0.2 秒） |
+
+> **单文件 vs 文件夹版**：单文件版每次运行都要把内置运行时解压到临时目录，
+> 所以启动慢一些（Windows 约 1.4 秒，macOS 约 0.2 秒）。图形界面无所谓，
+> 但如果你要**频繁调用命令行**（比如写脚本），用文件夹版或安装版更合适。
+>
+> **为什么 Windows 的单文件版分两个**：Windows 上"一个 exe 同时干 GUI 和 CLI"
+> 做不到 —— PE 头只能有一个子系统。`console=False` 的 exe（Subsystem=GUI）
+> 双击不弹黑框，但它的 stdout 会被丢弃，命令行拿不到输出；
+> 所以分别产出 GUI 版（Subsystem=2）和 CLI 版（Subsystem=3）。
 
 ### 关于体积
 
