@@ -449,6 +449,13 @@ def _resolve_credentials(cfg: Config, args) -> None:
             cfg.password = _safe_getpass("请输入密码：")
 
 
+def _client(cfg: Config, http: HttpClient) -> XkClient:
+    """按配置构造业务客户端（把用户填的地址归一化成 HTTPS）。"""
+    from .auth import normalize_base_url
+
+    return XkClient(http, api_base=normalize_base_url(cfg.api_base))
+
+
 def _build_http(cfg: Config) -> HttpClient:
     return HttpClient(
         min_interval=cfg.poll.min_request_interval,
@@ -548,14 +555,14 @@ def _connect(cfg: Config, args, *, need_login: bool = True) -> tuple[HttpClient,
         http.cookies = session.cookies
         http.set_token(session.token)
         http.student_code = session.student_code
-        return http, XkClient(http), session
+        return http, _client(cfg, http), session
 
     if manual is not None:
         http.cookies = manual.cookies
         http.set_token(manual.token)
         if manual.student_code:
             http.student_code = manual.student_code
-        return http, XkClient(http), manual
+        return http, _client(cfg, http), manual
 
     # 复用缓存会话（仅在未显式要求重新登录时）
     cached = Session.load(cfg.base_dir / cfg.session_file)
@@ -570,18 +577,18 @@ def _connect(cfg: Config, args, *, need_login: bool = True) -> tuple[HttpClient,
         probe.cookies = cached.cookies
         probe.set_token(cached.token)
         try:
-            XkClient(probe).student_info()
+            _client(cfg, probe).student_info()
         except BitxkError:
             logger.debug("缓存会话已失效，改为重新登录")
         else:
             log_ok(f"复用本地缓存会话（{cached.student_name or cached.student_code}）")
-            return probe, XkClient(probe), cached
+            return probe, _client(cfg, probe), cached
         finally:
             if probe is not http:
                 probe.close()
 
     if not need_login:
-        return http, XkClient(http), Session(token="")
+        return http, _client(cfg, http), Session(token="")
 
     _resolve_credentials(cfg, args)
     auth = _build_auth(cfg, http, args)
@@ -594,7 +601,7 @@ def _connect(cfg: Config, args, *, need_login: bool = True) -> tuple[HttpClient,
     except OSError as exc:
         log_warn(f"会话未能保存：{exc}")
     log_ok(f"登录成功：{session.student_name or session.student_code}")
-    return http, XkClient(http), session
+    return http, _client(cfg, http), session
 
 
 # --------------------------------------------------------------------------
@@ -850,14 +857,14 @@ def cmd_grab(args) -> int:
             http.cookies = session.cookies
             http.set_token(session.token)
             http.student_code = session.student_code
-            client = XkClient(http)
+            client = _client(cfg, http)
         elif manual is not None:
             http = _build_http(cfg)
             http.cookies = manual.cookies
             http.set_token(manual.token)
             if manual.student_code:
                 http.student_code = manual.student_code
-            client = XkClient(http)
+            client = _client(cfg, http)
             session = manual
             if not manual.student_code:
                 log_warn(

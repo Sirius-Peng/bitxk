@@ -157,6 +157,45 @@ GET  .../student/register.do?number=<key>
 - `cbc`（旧版 wisedu，部分学校仍在用）：`AES-128-CBC`，明文 = 64 位随机串 + 密码，`iv` = 16 位随机串。
   若登录页出现 `pwdEncryptSalt` 而非 `login-croypto`，工具会自动切到该模式；也可用 `--encrypt-mode cbc` 手动指定。
 
+### 1.2 关于网址的写法
+
+选课系统的入口是：
+
+```
+http://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do
+```
+
+工具内部使用的是它的 **HTTPS** 形式：
+
+```
+https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp
+```
+
+这不是偏好问题，而是必须的：选课系统**全站强制 HTTPS**，`http://` 的
+任何路径（首页、CAS 回跳、业务接口）都会返回 `302` 跳转到 `https://`。
+
+这对 GET 无害，但对 **POST 是致命的** —— HTTP 客户端跟随 302 时会把
+POST **降级成 GET 并丢掉请求体**，服务端收到的根本不是查询请求，而是
+一张选课首页的 HTML，表现出来就像"登录态失效"，非常难排查：
+
+```
+POST http://…/elective/publicCourse.do
+  → 302 → https://…
+  → 实际发出 GET（无 body）
+  → 200 + 选课首页 HTML      ← 参数没了
+```
+
+所以如果你在配置里填了 `http://` 的地址，工具会自动升级成 `https://`：
+配置加载时归一化一次，运行时若真收到 http→https 的 302 还会就地升级
+基址并**重发原请求**（而不是跟着跳转）。
+
+配置项（一般不用改）：
+
+```toml
+# 可以整条粘进来，会自动归一化
+api_base = "http://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"
+```
+
 ### 2. 业务接口
 
 所有业务请求都在 `https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/` 下，鉴权靠 **全小写 header `token`**（另发 `language`）。

@@ -27,7 +27,7 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
-from .auth import API_BASE
+from .auth import API_BASE, normalize_base_url
 from .exceptions import (
     ApiError,
     NetworkError,
@@ -150,7 +150,8 @@ class XkClient:
         process_poll_attempts: int = 10,
     ) -> None:
         self.http = http
-        self.api_base = api_base.rstrip("/")
+        # 统一升级到 HTTPS：http:// 会让 POST 被 302 降级成 GET（详见 normalize_base_url）
+        self.api_base = normalize_base_url(api_base)
         #: 校区码。**不是固定常量**，取自学生信息；未探测到时留空由服务端兜底。
         self.campus = campus
         self.language = language
@@ -220,6 +221,23 @@ class XkClient:
         #   3) HTTP 200 + 应用首页 HTML（requests 自动跟完 302 后的落点）。
         if resp.status_code in (301, 302, 303, 307, 308):
             location = resp.headers.get("Location", "") or str(getattr(resp, "url", ""))
+
+            # 兜底：如果只是因为 scheme/host 升级（http→https）才跳转，
+            # 就升级基址并**重发一次原请求**。绝不能让 HTTP 客户端去跟随这个
+            # 302 —— 那会把 POST 降级成 GET 并丢掉请求体。
+            upgraded_base = _upgraded_base(url, location)
+            if upgraded_base and upgraded_base != self.api_base:
+                # 只升级到「协议 + 主机」，**不能**把端点路径也吃进 base，
+                # 否则重试时 path 会被拼两次。
+                logger.info("接口地址已升级为 %s，后续请求将直接使用新地址", upgraded_base)
+                self.api_base = upgraded_base
+                return self._request(
+                    method,
+                    path,
+                    raise_on_business_error=raise_on_business_error,
+                    **kwargs,
+                )
+
             if _looks_like_login_page(location) or "index.do" in location:
                 raise TokenExpired(f"接口 {path} 重定向到首页，登录态已失效")
             raise ApiError(f"接口 {path} 发生意外重定向：{location[:120]}")
@@ -816,6 +834,34 @@ _AUTH_FAILURE_PHRASES = (
     "认证失败",
     "会话已失效",
 )
+
+
+def _upgraded_base(current_url: str, location: str) -> str | None:
+    """判断跳转是否只是「协议升级」，若是则返回升级后的**基址**。
+
+    只在「同一主机 + http → https」这种明确情况下返回结果，其余跳转
+    （跳到登录页、跳到首页、跨主机）一律返回 ``None``，交给调用方按
+    登录失效或异常处理。
+
+    返回的是 ``scheme://host`` 形式的基址，不含路径 —— 因为 ``api_base``
+    的语义就是基址，端点路径由调用方拼接。
+    """
+    if not location:
+        return None
+    from urllib.parse import urljoin, urlparse
+
+    target = urljoin(current_url, location)
+    src, dst = urlparse(current_url), urlparse(target)
+    if not src.hostname or not dst.hostname or src.hostname != dst.hostname:
+        return None
+    if src.scheme != "http" or dst.scheme != "https":
+        return None
+
+    # 复用同一个站点的既有前缀（/xsxkapp/sys/xsxkapp），没有就用默认
+    prefix = "/xsxkapp/sys/xsxkapp"
+    if "/xsxkapp/sys/xsxkapp" in dst.path:
+        prefix = "/xsxkapp/sys/xsxkapp"
+    return f"https://{dst.netloc}{prefix}"
 
 
 def _redirected_to_index(resp) -> bool:

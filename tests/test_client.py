@@ -771,3 +771,109 @@ class TestServerBusy:
         auth = BitAuth(FakeAuthHttp())
         with pytest.raises(LoginError):
             auth._register("S", "KEY")
+
+
+class TestBaseUrlHandling:
+    """用户可能填 http:// 或直接粘完整网址 —— 都必须能正常工作。
+
+    这里固化的是一条实测出来的坑：选课系统全站强制 HTTPS，``http://`` 的
+    任何路径都会 302 跳到 ``https://``。而 HTTP 客户端跟随 302 时会把
+    POST **降级成 GET 并丢掉请求体**，服务端于是返回选课首页 HTML ——
+    表现成"登录态失效"，非常难排查。
+    """
+
+    @pytest.mark.parametrize(
+        ("given", "expected"),
+        [
+            # 用户直接粘的完整地址（任务里给的就是这个）
+            (
+                "http://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do",
+                "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp",
+            ),
+            # 已经是正确的 https 基址
+            (
+                "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp",
+                "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp",
+            ),
+            # 只给域名
+            ("http://xk.bit.edu.cn", "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp"),
+            ("xk.bit.edu.cn", "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp"),
+            # 少一层路径
+            ("https://xk.bit.edu.cn/xsxkapp/", "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp"),
+            # 末尾斜杠
+            (
+                "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/",
+                "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp",
+            ),
+        ],
+    )
+    def test_地址归一化(self, given, expected):
+        from bitxk.auth import normalize_base_url
+
+        assert normalize_base_url(given) == expected
+
+    def test_空地址回退到默认(self):
+        from bitxk.auth import API_BASE, normalize_base_url
+
+        assert normalize_base_url("") == API_BASE
+        assert normalize_base_url("   ") == API_BASE
+
+    def test_客户端构造时就升级到_https(self):
+        client, _ = make_client()
+        assert client.api_base.startswith("https://")
+
+        from bitxk.auth import normalize_base_url
+
+        http_url = "http://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"
+        client2, _ = make_client()
+        client2.api_base = normalize_base_url(http_url)
+        assert client2.api_base.startswith("https://")
+
+    def test_收到_scheme_升级跳转时自动重发而非报错(self):
+        """运行时兜底：真收到 http→https 的 302 就升级基址并重发一次。"""
+        client, http = make_client(
+            FakeResponse(
+                None,
+                status_code=302,
+                text="",
+                headers={"Location": "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/elective/publicCourse.do"},
+                url="http://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/elective/publicCourse.do",
+            ),
+            envelope(dataList=[]),  # 重发后的正常响应
+        )
+        # 注意 base 不含端点路径，端点由 path 拼接
+        client.api_base = "http://xk.bit.edu.cn/xsxkapp/sys/xsxkapp"
+
+        result = client.query_courses("x", batch_code="B", student_code="S")
+        assert result == []
+        # 基址被就地升级，后续请求不会再走一次 http
+        assert client.api_base == "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp"
+        assert len(http.calls) == 2
+
+    def test_跳到首页仍然报登录失效(self):
+        """只有 scheme 升级才重发；跳到首页说明登录态没了，必须照旧报错。"""
+        client, _ = make_client(
+            FakeResponse(
+                None,
+                status_code=302,
+                text="",
+                headers={"Location": "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"},
+                url="https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/elective/publicCourse.do",
+            )
+        )
+        with pytest.raises(TokenExpired, match="重定向到首页"):
+            client.query_courses("x", batch_code="B", student_code="S")
+
+    def test_跨主机跳转不被当作升级(self):
+        """跳到别的域名可能是在被钓鱼/劫持，绝不能带着参数跟过去。"""
+        client, _ = make_client(
+            FakeResponse(
+                None,
+                status_code=302,
+                text="",
+                headers={"Location": "https://evil.example.com/steal"},
+                url="https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/elective/publicCourse.do",
+            )
+        )
+        with pytest.raises(ApiError, match="意外重定向"):
+            client.query_courses("x", batch_code="B", student_code="S")

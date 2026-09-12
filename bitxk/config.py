@@ -32,6 +32,12 @@ SAMPLE_CONFIG = """\
 # 所有时间单位均为秒。
 # ============================================================
 
+# 选课系统接口基址。默认就是本科选课系统，一般不用改。
+# 如果你手上的地址不一样，可以整条粘进来。注意 http 会被自动升级成 https ——
+# 因为 http 下的 POST 会被服务器 302 降级成 GET 并丢掉参数：
+#   api_base = "http://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"
+api_base = ""
+
 [account]
 # 本科生学号 / 统一身份认证密码。
 # 也可以改用环境变量 BITXK_USERNAME、BITXK_PASSWORD，那样更安全
@@ -235,6 +241,11 @@ class Config:
     http: HttpConfig = field(default_factory=HttpConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     courses: list[WatchTarget] = field(default_factory=list)
+    #: 选课系统接口基址。默认本科选课系统。
+    #: 可以粘完整的 ``http://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do``，
+    #: 会自动归一化成 ``https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp``
+    #: （http 必须升级成 https，否则 POST 会被 302 降级成 GET）。
+    api_base: str = ""
     #: 加密模式（SSO 页面结构变化时可切换）
     encrypt_mode: str = "ecb"
     #: 会话缓存路径
@@ -259,7 +270,7 @@ class Config:
         """
         if require_account and not self.username:
             raise ConfigError(
-                "未配置学号。请在 config.toml 的 [account] 段填写 username，"
+                "未配置学号。请在 config.toml 的 [account] 段填写 username，",
                 "或设置环境变量 BITXK_USERNAME。"
             )
         if not self.courses:
@@ -323,6 +334,7 @@ def load_config(path: str | Path | None = None) -> Config:
         poll=_build(PollConfig, _section(raw, "poll")),
         http=_build(HttpConfig, _section(raw, "http")),
         notify=_build(NotifyConfig, _section(raw, "notify")),
+        api_base=str(raw.get("api_base", "") or ""),
         encrypt_mode=str(raw.get("encrypt_mode", "ecb") or "ecb"),
         session_file=str(raw.get("session_file", ".bitxk_session.json") or ".bitxk_session.json"),
         base_dir=path.parent,

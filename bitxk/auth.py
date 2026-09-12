@@ -65,6 +65,45 @@ CAS_SERVICE_URL = f"{XK_BASE}/sys/xsxkapp/bitXsxkLogin/casLogin.do"
 API_BASE = f"{XK_BASE}/sys/xsxkapp"
 """业务接口基址。"""
 
+def normalize_base_url(url: str) -> str:
+    """把用户可能填错/粘贴错的地址统一成可用的 HTTPS 基址。
+
+    选课系统对 **全站强制 HTTPS**：``http://`` 的任何路径（首页、CAS 回跳、
+    业务接口）都会返回 ``302`` 跳转到 ``https://``。
+
+    这件事对 GET 无害，但对 **POST 是致命的** —— HTTP 客户端跟随 302 时
+    会把 POST 降级成 GET 并丢掉请求体，导致服务端收到的根本不是查询/选课
+    请求（实测会返回选课首页 HTML，表现成"登录态失效"）。
+    所以这里统一在入口处把 scheme 升级掉，并在 :meth:`XkClient._request`
+    里保留一层运行时兜底。
+
+    Args:
+        url: 用户提供的地址，可能带路径、可能省略 scheme。
+
+    Returns:
+        形如 ``https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp`` 的基址。
+    """
+    text = (url or "").strip()
+    if not text:
+        return API_BASE
+
+    # 用户可能直接粘贴完整的 index.do 地址，这里只取到 /sys/xsxkapp 为止
+    match = re.match(
+        r"^(?P<scheme>https?)://(?P<host>[^/]+)(?P<prefix>/xsxkapp(?:/sys/xsxkapp)?)?",
+        text,
+        re.I,
+    )
+    if match:
+        host = match.group("host")
+        return f"https://{host}/xsxkapp/sys/xsxkapp"
+
+    # 只给了域名
+    host = text.split("/")[0]
+    if host:
+        return f"https://{host}/xsxkapp/sys/xsxkapp"
+    return API_BASE
+
+
 #: 校外 WebVPN 前缀（走校园 VPN 时可作为备选基址）。
 WEBVPN_PREFIX = (
     "https://webvpn.bit.edu.cn/https/77726476706e69737468656265737421e3e44ed225397c1e7b0c9ce29b5b"

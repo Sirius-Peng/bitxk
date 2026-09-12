@@ -963,6 +963,8 @@ def save_config(cfg: Config, path: str | Path) -> None:
     lines: list[str] = [
         "# 由 BIT 选课助手 GUI 保存",
         "",
+        f'api_base = "{_escape(cfg.api_base)}"',
+        "",
         "[account]",
         f'username = "{_escape(cfg.username)}"',
         f'password = "{_escape(cfg.password)}"',
