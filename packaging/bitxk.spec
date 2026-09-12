@@ -82,6 +82,9 @@ excludes = [
     "tarfile", "curses", "distutils", "ensurepip", "venv",
 ]
 
+# Windows 没有 strip 命令，强行开启会让 PyInstaller 抛 FileNotFoundError。
+STRIP_BINARIES = IS_MACOS or sys.platform.startswith('linux')
+
 block_cipher = None
 
 a = Analysis(
@@ -116,7 +119,7 @@ exe_console = EXE(
     name="bitxk",
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,
+    strip=STRIP_BINARIES,
     upx=False,
     console=True,
     disable_windowed_traceback=False,
@@ -137,7 +140,7 @@ exe_gui = EXE(
     name="bitxk-gui",
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,
+    strip=STRIP_BINARIES,
     upx=False,
     console=False,  # Windows 上双击不弹黑框
     disable_windowed_traceback=False,
@@ -153,7 +156,7 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    strip=True,
+    strip=STRIP_BINARIES,
     upx=False,
     upx_exclude=[],
     name=APP_NAME,

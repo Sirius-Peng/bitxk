@@ -91,24 +91,130 @@ class Style:
         return cls._wrap(text, _BOLD)
 
 
+#: 各平台的输出编码与可用符号。
+#:
+#: Windows 中文版的默认控制台编码是 **GBK（cp936）**，输出 ``✓`` 会直接抛
+#: ``UnicodeEncodeError`` 让程序崩溃 —— 这是打包成 exe 后必现的问题。
+#: 所以这里先尝试把控制台切到 UTF-8；切不动就退回纯 ASCII 符号。
+def _prepare_console() -> tuple[str, str, str]:
+    """返回 ``(ok记号, warn记号, err记号)``，并尽量让控制台能吃下它们。"""
+    # 1) Windows：先把控制台代码页切到 UTF-8
+    if sys.platform == "win32":  # pragma: no cover - 平台相关
+        with contextlib.suppress(Exception):
+            import ctypes
+
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+
+    # 2) 再让 Python 的 stdout 用 UTF-8（打包后 PYTHONIOENCODING 未必生效）
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    # 3) 实际试一下能不能编码，不能就用 ASCII 兜底
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        "✓✗!→".encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return "[OK]", "[!]", "[x]"
+    return "✓", "!", "✗"
+
+
+_OK_MARK, _WARN_MARK, _ERR_MARK = _prepare_console()
+
+
+#: 控制台吃不下 Unicode 时的 ASCII 替代表。
+#: 只覆盖"会真正打印出来"的符号 —— 注释里的制表符、破折号不影响运行。
+_ASCII_FALLBACK = {
+    "✓": "[OK]", "✗": "[x]", "★": "*", "·": "-", "←": "<-", "→": "->",
+    "…": "...", "—": "-", "─": "-", "×": "x", "≥": ">=", "🎉": "[OK]",
+}
+
+
+class _AsciiSafeStream:
+    """包住 stdout/stderr，保证任何输出都不会因为编码问题崩掉。
+
+    比在每个 print 上加 try 更彻底：连第三方库的输出、异常回溯
+    都被同一层兜住。
+    """
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+
+    def write(self, text: str) -> int:
+        try:
+            return self._stream.write(text)
+        except UnicodeEncodeError:
+            return self._stream.write(_ascii_fallback(str(text)))
+
+    def __getattr__(self, name):  # 其余属性透传给真实流
+        return getattr(self._stream, name)
+
+
+def _ascii_fallback(text: str) -> str:
+    """把控制台编不出的符号替换成 ASCII 等价物。"""
+    out = text
+    for fancy, plain in _ASCII_FALLBACK.items():
+        out = out.replace(fancy, plain)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return out.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
+def _install_stream_guard() -> None:
+    """在 Windows 等 GBK 控制台上给输出流加保护。"""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None or isinstance(stream, _AsciiSafeStream):
+            continue
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        try:
+            "✓→★".encode(encoding)
+        except (UnicodeEncodeError, LookupError):
+            setattr(sys, name, _AsciiSafeStream(stream))
+
+
+def _safe(text: object) -> str:
+    """把一段要打印的文本转成当前控制台能安全输出的形式。
+
+    Windows 中文版控制台是 GBK，遇到 ``✓`` ``→`` 这类字符会直接抛
+    ``UnicodeEncodeError`` 把程序打崩。这里在**唯一出口**统一兜住，
+    比在每个 print 上加 try 更可靠。
+    """
+    s = str(text)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        s.encode(encoding)
+        return s
+    except (UnicodeEncodeError, LookupError):
+        pass
+    for fancy, plain in _ASCII_FALLBACK.items():
+        s = s.replace(fancy, plain)
+    # 仍有编不出来的字符（罕见），直接丢弃而不是崩掉
+    return s.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
+# 定义齐了，现在给输出流装上保护
+_install_stream_guard()
+
+
 def _stamp() -> str:
     return time.strftime("%H:%M:%S")
 
 
 def log(message: str) -> None:
-    print(f"{Style.dim(_stamp())} {message}", flush=True)
+    print(_safe(f"{Style.dim(_stamp())} {message}"), flush=True)
 
 
 def log_ok(message: str) -> None:
-    log(f"{Style.green('✓')} {message}")
+    log(f"{Style.green(_OK_MARK)} {message}")
 
 
 def log_warn(message: str) -> None:
-    log(f"{Style.yellow('!')} {message}")
+    log(f"{Style.yellow(_WARN_MARK)} {message}")
 
 
 def log_err(message: str) -> None:
-    log(f"{Style.red('✗')} {message}")
+    log(f"{Style.red(_ERR_MARK)} {message}")
 
 
 # --------------------------------------------------------------------------
