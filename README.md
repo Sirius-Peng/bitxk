@@ -305,7 +305,7 @@ bitxk gui
 
 ### 方式一：下载现成的发行版（推荐，不用装 Python）
 
-到 [Releases](../../releases) 页面下载对应平台的文件：
+到 [Releases](https://github.com/Sirius-Peng/bitxk/releases) 页面下载对应平台的文件：
 
 | 平台 | 文件 | 解压后 |
 |---|---|---|
@@ -351,7 +351,7 @@ bitxk gui
 `tkinter`，**不需要额外安装任何东西**。
 
 ```bash
-git clone <本仓库地址> bitxk && cd bitxk
+git clone https://github.com/Sirius-Peng/bitxk.git && cd bitxk
 
 # 装成命令（推荐）
 pip install -e .
