@@ -292,6 +292,22 @@ class TeachingClass:
         return self.status is CourseStatus.AVAILABLE
 
     @property
+    def capacity_compact(self) -> str:
+        """``已选/容量`` 的紧凑写法，给列宽紧张的表格用。
+
+        完整写法 ``32/60 (余 28)`` 约 91px，窄列会截成 ``32/60 (…``；
+        而余量往往另有独立列，这里只留 ``32/60`` 就够了（约 46px）。
+        """
+        if self.capacity is None:
+            return "容量未知" if self.remaining is None else f"余 {self.remaining}"
+        used = (
+            self.selected_count
+            if self.selected_count is not None
+            else self.capacity - (self.remaining or 0)
+        )
+        return f"{used}/{self.capacity}"
+
+    @property
     def capacity_text(self) -> str:
         """人类可读的容量描述，例如 ``12/40 (余 28)``。"""
         if self.remaining is None:

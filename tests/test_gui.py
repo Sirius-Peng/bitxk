@@ -80,7 +80,7 @@ class TestCourseManagement:
         assert len(app.course_tree.get_children()) == 1
         values = app.course_tree.item(app.course_tree.get_children()[0], "values")
         assert values[0] == "测试课"
-        assert values[1] == CourseType.label(CourseType.XGXK)
+        assert values[1] == CourseType.short_label(CourseType.XGXK)
 
     def test_禁用的课有标记(self, app):
         app.cfg.courses.append(WatchTarget(name="停用课", enabled=False))
@@ -149,7 +149,7 @@ class TestCourseTable:
                 "conflict": "冲突",
                 "selected": "已选",
             }.get(status, status),
-            "capacity_text": f"{capacity - (remaining or 0)}/{capacity} (余 {remaining})",
+            "capacity_text": f"{capacity - (remaining or 0)}/{capacity}",
             "key": key,
         }
 
@@ -161,9 +161,9 @@ class TestCourseTable:
         assert len(items) == 1
         values = app.cap_tree.item(items[0], "values")
         assert values[0] == "科幻文学"
-        assert values[1] == CourseType.label("XGXK")  # 类型列
-        assert values[2] == "1001"  # 教学班列
-        assert values[7] == "有余量"  # 状态列
+        assert str(values[2]) == "5"  # 余量列
+        assert values[3] == "有余量"  # 状态列
+        assert CourseType.short_label("XGXK") in values  # 类型列（短标签）（靠后）
 
     def test_表格包含所有要求的列(self, app):
         cols = app.cap_tree["columns"]
@@ -199,7 +199,7 @@ class TestCourseTable:
             self._rows(app, [self._row("XGXK:1001", remaining=remaining)])
         items = app.cap_tree.get_children()
         assert len(items) == 1, "同一教学班不该累加出多行"
-        assert app.cap_tree.item(items[0], "values")[6] == "3"
+        assert app.cap_tree.item(items[0], "values")[2] == "3"
 
     def test_不同教学班各自成行(self, app):
         self._rows(
@@ -323,7 +323,7 @@ class TestCourseTable:
                 self._row("b", course="体育", tc_type="TYKC"),
             ],
         )
-        app.type_var.set("TYKC 体育课程")
+        app.type_var.set("TYKC 体育")
         app._apply_filters()
         assert [app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children()] == ["体育"]
 
@@ -408,7 +408,7 @@ class TestCourseTable:
         )
         items = app.cap_tree.get_children()
         assert len(items) == 1, "轮询更新同一教学班不该新增行"
-        assert str(app.cap_tree.item(items[0], "values")[6]) == "3"
+        assert str(app.cap_tree.item(items[0], "values")[2]) == "3"
 
     def test_轮询新教学班会被追加(self, app):
         app._update_capacity_rows(
@@ -461,9 +461,12 @@ class TestWatchDetailPanel:
             ],
         }
 
-    def test_中间栏列齐全(self, app):
-        for need in ("class", "teacher", "capacity", "selected", "remaining", "status"):
-            assert need in app.detail_tree["columns"], f"缺少列 {need}"
+    def test_中间栏列齐全且关键列靠前(self, app):
+        cols = app.detail_tree["columns"]
+        for need in ("class", "capacity", "selected", "remaining", "status"):
+            assert need in cols, f"缺少列 {need}"
+        # 关键列必须排在最前，否则窄屏下需要横向滚动才看得到
+        assert cols[:5] == ("class", "capacity", "selected", "remaining", "status")
 
     def test_渲染教学班与人数(self, app):
         app._detail_course = "金融学概论"
@@ -471,10 +474,12 @@ class TestWatchDetailPanel:
         items = app.detail_tree.get_children()
         assert len(items) == 2
         v = app.detail_tree.item(items[0], "values")
-        assert v[0] == "1001"
-        assert v[2] == "120"  # 容量
-        assert v[3] == "121"  # 已选
-        assert v[4] == "0"  # 余量
+        # 列序：教学班 / 容量 / 已选 / 余量 / 状态 / 教师 / 时间地点
+        assert v[0] == "1001"  # 教学班
+        assert v[1] == "120"  # 容量
+        assert v[2] == "121"  # 已选
+        assert v[3] == "0"  # 余量
+        assert v[4] == "已满"  # 状态
 
     def test_标题汇总有余量班数(self, app):
         app._detail_course = "金融学概论"
@@ -550,7 +555,7 @@ class TestWatchDetailPanel:
         )
         items = app.detail_tree.get_children()
         assert len(items) == 1
-        assert app.detail_tree.item(items[0], "values")[3] == "121"
+        assert app.detail_tree.item(items[0], "values")[2] == "121"
 
     def test_轮询别的课不动中间栏(self, app):
         app._detail_course = "金融学概论"

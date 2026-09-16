@@ -113,9 +113,27 @@ class CourseType:
     #: 其余类型共用的端点
     DEFAULT_ENDPOINT = "elective/programCourse.do"
 
+    #: 表格里用的短标签 —— 列宽有限，"校公选课"会被截成"校公选…"，
+    #: 不如直接给个短而清楚的写法。
+    SHORT_LABELS = {
+        TJKC: "推荐",
+        FANKC: "方案内",
+        FAWKC: "方案外",
+        XGXK: "公选",
+        CXKC: "重修",
+        TYKC: "体育",
+        FXKC: "辅修",
+        QXKC: "全校",
+    }
+
     @classmethod
     def label(cls, code: str) -> str:
         return cls.LABELS.get(code, code)
+
+    @classmethod
+    def short_label(cls, code: str) -> str:
+        """表格列用的短标签（列宽紧张，长标签会被截断）。"""
+        return cls.SHORT_LABELS.get(code, code)
 
     @classmethod
     def endpoint(cls, code: str) -> str:

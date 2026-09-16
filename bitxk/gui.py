@@ -53,6 +53,31 @@ __all__ = ["run_gui"]
 # 配色（尽量贴近系统观感）
 # --------------------------------------------------------------------------
 
+#: 三张表格的最小可用宽度（像素）。
+#:
+#: 这些数字是「列宽合计 + 竖向滚动条」的实际值，布局按它们分配空间 ——
+#: 否则窗口小于表格总宽时，Treeview 会把列压到看不见内容。
+#: 调整任何一列的宽度时，务必同步这里，否则又会显示不全。
+#: 三栏各自的最小宽度。
+#:
+#: 关键认识：**最小值不等于列宽合计**。中、右两栏都有横向滚动条，
+#: 所以只要"最关键的前几列"能一屏看到就够了，其余可以横向滚动 ——
+#: 否则三栏加起来接近 1900px，1512px 的笔记本屏根本放不下。
+#:
+#: 三张表的关键列都放在最左边：
+#:   中栏  教学班 / 容量 / 已选 / 余量 / 状态
+#:   右栏  课程 / 容量 / 余量 / 状态
+# 每个数字 = 表格列宽合计 + 滚动条(~16) + 面板内边距(~40)，
+# 这样分配出来的宽度能让对应表格**不需要横向滚动**。
+COURSE_TREE_MIN_W = 312  # 左：263(列) + 16(滚动条) + 32(内边距)
+DETAIL_TREE_MIN_W = 536  # 中：488 + 48
+BROWSE_TREE_MIN_W = 852  # 右：804 + 48
+
+#: 三栏宽度合计 + 栏间距与窗口左右留白（6+6+14+14 ≈ 40，留 48 余量）
+LAYOUT_MIN_W = COURSE_TREE_MIN_W + DETAIL_TREE_MIN_W + BROWSE_TREE_MIN_W + 48
+#: 纵向：头部 + 表格 + 控制条 + 日志的最小高度
+LAYOUT_MIN_H = 620
+
 COLORS = {
     "bg": "#f5f6f8",
     "panel": "#ffffff",
@@ -255,11 +280,13 @@ class BitxkApp(ttk.Frame):
         self.master.rowconfigure(0, weight=1)
         self.master.columnconfigure(0, weight=1)
         # 三栏：任务列表 | 该任务的备选课程 | 全部课程查询
-        self.columnconfigure(0, weight=3, minsize=280)
-        self.columnconfigure(1, weight=4, minsize=320)
-        self.columnconfigure(2, weight=6, minsize=420)
-        self.rowconfigure(1, weight=1)
-        self.rowconfigure(3, weight=2)
+        # weight 与各表的实际列宽需求成比例，这样缩放窗口时不会出现
+        # 「窄的表很宽、宽的表被挤到显示不全」。
+        self.columnconfigure(0, weight=2, minsize=COURSE_TREE_MIN_W)
+        self.columnconfigure(1, weight=3, minsize=DETAIL_TREE_MIN_W)
+        self.columnconfigure(2, weight=5, minsize=BROWSE_TREE_MIN_W)
+        self.rowconfigure(1, weight=3)  # 表格区
+        self.rowconfigure(3, weight=2)  # 日志区
 
         self._build_header()
         self._build_course_panel()
@@ -291,8 +318,8 @@ class BitxkApp(ttk.Frame):
     # ---------------- 左侧：课程列表 ----------------
 
     def _build_course_panel(self) -> None:
-        box = ttk.LabelFrame(self, text=" 要盯的课程 ", padding=10)
-        box.grid(row=1, column=0, sticky="nsew", padx=(14, 6), pady=(0, 7))
+        box = ttk.LabelFrame(self, text=" 要盯的课程 ", padding=6)
+        box.grid(row=1, column=0, sticky="nsew", padx=(10, 4), pady=(0, 6))
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
 
@@ -301,9 +328,10 @@ class BitxkApp(ttk.Frame):
         self.course_tree.heading("name", text="课程名")
         self.course_tree.heading("type", text="类型")
         self.course_tree.heading("priority", text="优先级")
-        self.course_tree.column("name", width=170)
-        self.course_tree.column("type", width=90, anchor="center")
-        self.course_tree.column("priority", width=60, anchor="center")
+        # 列宽合计要 ≤ 表格可用宽度（容器 - 内边距），否则需要横向滚动
+        self.course_tree.column("name", width=125)
+        self.course_tree.column("type", width=88, anchor="center")
+        self.course_tree.column("priority", width=50, anchor="center")
         self.course_tree.grid(row=0, column=0, sticky="nsew")
         self.course_tree.bind("<Double-1>", lambda _e: self._on_edit_course())
         # 选中一门课 → 中间栏显示它的备选教学班
@@ -329,8 +357,8 @@ class BitxkApp(ttk.Frame):
         **我在盯的这门课**到底有几个班、每个班多少人、还差多少 ——
         决定「值不值得等」看的就是这里。
         """
-        box = ttk.LabelFrame(self, text=" 该任务的备选教学班 ", padding=10)
-        box.grid(row=1, column=1, sticky="nsew", padx=6, pady=(0, 7))
+        box = ttk.LabelFrame(self, text=" 该任务的备选教学班 ", padding=6)
+        box.grid(row=1, column=1, sticky="nsew", padx=4, pady=(0, 6))
         box.columnconfigure(0, weight=1)
         box.rowconfigure(1, weight=1)
 
@@ -341,16 +369,18 @@ class BitxkApp(ttk.Frame):
         self.detail_refresh_btn = ttk.Button(head, text="刷新", command=self._on_refresh_detail)
         self.detail_refresh_btn.pack(side="right")
 
-        columns = ("class", "teacher", "capacity", "selected", "remaining", "status", "place")
+        # 顺序必须与下面的 specs 一致 —— Treeview 只认这个元组的顺序，
+        # 光改 specs 是没用的（踩过：列序不生效，关键列还排在后面）。
+        columns = ("class", "capacity", "selected", "remaining", "status", "teacher", "place")
         self.detail_tree = ttk.Treeview(box, columns=columns, show="headings", height=8)
         specs = (
-            ("class", "教学班", 130, "center"),
-            ("teacher", "教师", 70, "w"),
-            ("capacity", "容量", 60, "center"),
-            ("selected", "已选", 60, "center"),
-            ("remaining", "余量", 55, "center"),
-            ("status", "状态", 70, "center"),
-            ("place", "时间地点", 150, "w"),
+            ("class", "教学班", 108, "center"),
+            ("capacity", "容量", 50, "center"),
+            ("selected", "已选", 50, "center"),
+            ("remaining", "余量", 50, "center"),
+            ("status", "状态", 60, "w"),
+            ("teacher", "教师", 50, "w"),
+            ("place", "时间地点", 120, "w"),
         )
         for key, text, width, anchor_x in specs:
             self.detail_tree.heading(key, text=text)
@@ -385,8 +415,8 @@ class BitxkApp(ttk.Frame):
           是 8 次请求，不能每敲一个字就重发；
         * 冲突与已满各自独立勾选，可以「只看有余量」也可以「只看冲突」。
         """
-        box = ttk.LabelFrame(self, text=" 课程查询（全部备选） ", padding=10)
-        box.grid(row=1, column=2, sticky="nsew", padx=(6, 14), pady=(0, 7))
+        box = ttk.LabelFrame(self, text=" 课程查询（全部备选） ", padding=6)
+        box.grid(row=1, column=2, sticky="nsew", padx=(4, 10), pady=(0, 6))
         box.columnconfigure(0, weight=1)
         box.rowconfigure(2, weight=1)
 
@@ -408,7 +438,7 @@ class BitxkApp(ttk.Frame):
             textvariable=self.type_var,
             state="readonly",
             width=12,
-            values=["全部"] + [f"{c} {CourseType.label(c)}" for c in CourseType.ALL],
+            values=["全部"] + [f"{c} {CourseType.short_label(c)}" for c in CourseType.ALL],
         )
         type_box.pack(side="left", padx=(6, 10))
         type_box.bind("<<ComboboxSelected>>", lambda _e: self._apply_filters())
@@ -452,28 +482,29 @@ class BitxkApp(ttk.Frame):
         ttk.Label(row2, textvariable=self.count_var, style="Muted.TLabel").pack(side="right")
 
         # ---- 表格 ----
+        # 顺序与 specs 保持一致（关键列靠前，窄屏也能先看到）
         columns = (
             "course",
-            "type",
-            "class",
-            "teacher",
-            "place",
             "capacity",
             "remaining",
             "status",
+            "teacher",
+            "type",
+            "class",
+            "place",
             "updated",
         )
         self.cap_tree = ttk.Treeview(box, columns=columns, show="headings", height=8)
         specs = (
             ("course", "课程", 170, "w"),
-            ("type", "类型", 80, "center"),
-            ("class", "教学班", 150, "center"),
-            ("teacher", "教师", 80, "w"),
-            ("place", "时间地点", 170, "w"),
-            ("capacity", "容量", 90, "center"),
-            ("remaining", "余量", 60, "center"),
-            ("status", "状态", 80, "center"),
-            ("updated", "更新于", 70, "center"),
+            ("capacity", "容量", 76, "center"),
+            ("remaining", "余量", 50, "center"),
+            ("status", "状态", 62, "center"),
+            ("teacher", "教师", 60, "w"),
+            ("type", "类型", 66, "center"),
+            ("class", "教学班", 120, "center"),
+            ("place", "时间地点", 140, "w"),
+            ("updated", "更新于", 60, "center"),
         )
         for key, text, width, anchor in specs:
             # 点列标题排序
@@ -603,7 +634,11 @@ class BitxkApp(ttk.Frame):
             self.course_tree.insert(
                 "",
                 "end",
-                values=(target.name + label, CourseType.label(target.type), target.priority),
+                values=(
+                    _fit(target.name + label, 125),
+                    _fit(CourseType.short_label(target.type), 88),
+                    target.priority,
+                ),
             )
 
     def _selected_course_index(self) -> int | None:
@@ -1190,13 +1225,13 @@ class BitxkApp(ttk.Frame):
                 "",
                 "end",
                 values=(
-                    row.get("class", ""),
-                    row.get("teacher") or "-",
+                    _fit(row.get("class", ""), 108),
                     "-" if row.get("capacity") is None else row["capacity"],
                     "-" if row.get("selected") is None else row["selected"],
                     "-" if row.get("remaining") is None else row["remaining"],
-                    row.get("status_label", ""),
-                    (row.get("place") or "")[:28],
+                    _fit(row.get("status_label", ""), 60),
+                    _fit(row.get("teacher") or "-", 50),
+                    _fit(row.get("place") or "", 120),
                 ),
                 tags=(tag,) if tag else (),
             )
@@ -1308,7 +1343,10 @@ class BitxkApp(ttk.Frame):
                                 "selected": tc.selected_count,
                                 "status": tc.status.value,
                                 "status_label": tc.status.label,
-                                "capacity_text": tc.capacity_text,
+                                # 表格里用紧凑写法（余量另有独立列），
+                                # 完整写法留着给提示/日志用
+                                "capacity_text": tc.capacity_compact,
+                                "capacity_full": tc.capacity_text,
                                 "key": f"{tc_type}:{tc.teaching_class_id}",
                             }
                         )
@@ -1427,14 +1465,14 @@ class BitxkApp(ttk.Frame):
                 "end",
                 iid=row["key"],
                 values=(
-                    row["course"],
-                    CourseType.label(row["type"]),
-                    row["class"],
-                    row.get("teacher") or "-",
-                    (row.get("place") or "")[:30],
-                    row.get("capacity_text") or "-",
+                    _fit(row["course"], 170),
+                    _fit(row.get("capacity_text") or "-", 76),
                     "-" if row.get("remaining") is None else row["remaining"],
-                    row["status_label"],
+                    _fit(row["status_label"], 62),
+                    _fit(row.get("teacher") or "-", 60),
+                    _fit(CourseType.short_label(row["type"]), 66),
+                    _fit(row["class"], 120),
+                    _fit(row.get("place") or "", 140),
                     stamp,
                 ),
                 tags=(tag,) if tag else (),
@@ -1560,6 +1598,68 @@ def _wrap_poller_events(base_handler, on_success):
     return handler
 
 
+#: 截断用字体的缓存。首调用时从 Tk 取默认字体；取不到就退回估算系数。
+_FIT_FONT: object | None = None
+_FIT_FONT_READY = False
+
+
+def _fit_font():
+    """拿到用于量文字宽度的字体；拿不到返回 None。"""
+    global _FIT_FONT, _FIT_FONT_READY
+    if not _FIT_FONT_READY:
+        _FIT_FONT_READY = True
+        with contextlib.suppress(Exception):
+            import tkinter.font as tkfont
+
+            _FIT_FONT = tkfont.nametofont("TkDefaultFont")
+    return _FIT_FONT
+
+
+def _text_px(text: str) -> int:
+    """量一段文字的真实像素宽度。
+
+    优先用 Tk 字体实测 —— 比任何估算都准。取不到字体时（比如无 GUI 的
+    单测环境）退回「半角 7px、全角翻倍」的估算，宁可少截不要多截。
+    """
+    font = _fit_font()
+    if font is not None:
+        try:
+            return int(font.measure(text))
+        except Exception:  # pragma: no cover - Tk 已销毁
+            pass
+    return int(sum(7.0 if ord(ch) <= 0x2E80 else 14.0 for ch in text))
+
+
+def _fit(text: object, column_px: int) -> str:
+    """把文本截到能放进 ``column_px`` 宽的列里，放不下就加省略号。
+
+    Treeview 单元格**不换行**，超出部分被硬裁 —— 看起来就是"显示不全"。
+    这里主动截断，让用户知道内容被截了而不是莫名少半截。
+
+    宽度用 :func:`_text_px` 实测（Tk 字体），不是拍脑袋的系数 ——
+    早期版本用固定系数估算，把本该放得下的时间串也截掉了。
+    """
+    raw = "" if text is None else str(text)
+    if not raw:
+        return ""
+
+    # 单元格左右内边距，再加一点安全余量
+    avail = column_px - 16
+    if avail <= 0 or _text_px(raw) <= avail:
+        return raw
+
+    # 二分找最长的可显示前缀
+    ellipsis_px = _text_px("…")
+    low, high = 0, len(raw)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _text_px(raw[:mid]) + ellipsis_px <= avail:
+            low = mid
+        else:
+            high = mid - 1
+    return (raw[:low] + "…") if low else "…"
+
+
 def _has_font(name: str) -> bool:
     import tkinter.font as tkfont
 
@@ -1631,6 +1731,38 @@ def _escape(text: str) -> str:
     return str(text).replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _window_geometry(root: tk.Tk) -> tuple[str, tuple[int, int]]:
+    """按屏幕尺寸算出合适的窗口大小与最小尺寸。
+
+    原则：
+
+    * 默认开到屏幕的 92% 宽 / 88% 高，但不超过 1760x1040 —— 三栏表格
+      的列宽合计约 1.4k px，宽屏上应该一屏放得下，不该让用户自己去拉。
+    * 最小尺寸取 :data:`LAYOUT_MIN_W`，保证任何情况下三栏都有可用宽度；
+      若屏幕本身就比这个小（小笔记本），则退让到屏幕宽度的 96%，
+      免得最小尺寸超过屏幕反而无法显示。
+    * 窗口**居中显示**，不贴着左下角。
+    """
+    root.update_idletasks()
+    screen_w = root.winfo_screenwidth()
+    screen_h = root.winfo_screenheight()
+
+    # 默认宽度：优先保证三栏都放得下（LAYOUT_MIN_W），但不超过屏幕可用宽度。
+    # 90px 是给窗口边框/阴影留的余量，避免窗口比屏幕还宽。
+    usable_w = max(720, screen_w - 60)
+    usable_h = max(480, screen_h - 100)
+    width = min(1760, max(LAYOUT_MIN_W, int(screen_w * 0.95)), usable_w)
+    height = min(1040, max(LAYOUT_MIN_H, int(screen_h * 0.92)), usable_h)
+
+    # 最小尺寸同样不能超过屏幕可用区域，否则会被"顶"出屏幕边界
+    min_w = min(LAYOUT_MIN_W, usable_w)
+    min_h = min(LAYOUT_MIN_H, usable_h)
+
+    x = max(0, (screen_w - width) // 2)
+    y = max(0, (screen_h - height) // 3)
+    return f"{width}x{height}+{x}+{y}", (min_w, min_h)
+
+
 def run_gui(config_path: str | Path | None = None, *, title: str = "BIT 选课助手") -> int:
     """启动图形界面。"""
     try:
@@ -1641,10 +1773,14 @@ def run_gui(config_path: str | Path | None = None, *, title: str = "BIT 选课�
         ) from exc
 
     root.title(title)
-    root.geometry("1080x760")
-    root.minsize(900, 640)
+
+    # 先设缩放再算几何：缩放会改变字体与控件尺寸，顺序反了会算小
     with contextlib.suppress(Exception):
         root.tk.call("tk", "scaling", 1.25)
+
+    geometry, (min_w, min_h) = _window_geometry(root)
+    root.geometry(geometry)
+    root.minsize(min_w, min_h)
 
     BitxkApp(root, config_path=config_path)
     root.mainloop()
