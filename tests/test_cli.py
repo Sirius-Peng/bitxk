@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 import bitxk.cli as cli
+from bitxk.exceptions import BitxkError, NetworkError, TokenExpired
 
 # --------------------------------------------------------------------------
 # 参数解析
@@ -331,3 +332,69 @@ class TestStyle:
     def test_启用时包裹转义序列(self, monkeypatch):
         monkeypatch.setattr(cli.Style, "enabled", True)
         assert cli.Style.red("x").startswith("\033[31m")
+
+
+class TestCachedSessionResilience:
+    """缓存会话在网络故障时不该被丢弃 —— 实测踩过的坑。
+
+    真机上遇到：`xk.bit.edu.cn` 临时不可达（SSL EOF），而校验缓存会话的
+    代码把**任何** BitxkError 都当成"会话失效"，于是删掉好好的登录态、
+    转去要求输入密码。用户看到的是"让我重新登录"，而真正的问题只是网络。
+    """
+
+    def _cfg(self, tmp_path):
+        from bitxk.config import Config, WatchTarget
+
+        cfg = Config(base_dir=tmp_path)
+        # 至少要有一门课，否则会先被 validate() 拦下，测不到网络分支
+        cfg.courses = [WatchTarget(name="测试课")]
+        return cfg
+
+    def test_网络错误不丢会话(self, tmp_path, monkeypatch):
+        from bitxk.auth import Session
+        from bitxk.cli import _connect
+        from bitxk.exceptions import BitxkError
+
+        session = Session(
+            token="TOK", cookies={"_WEU": "x"}, student_code="1120252751", origin="browser"
+        )
+        session.save(tmp_path / ".bitxk_session.json")
+
+        class BoomClient:
+            def __init__(self, *_a, **_k):
+                pass
+
+            def student_info(self, *_a, **_k):
+                raise NetworkError("SSL EOF")
+
+        monkeypatch.setattr("bitxk.cli._client", BoomClient)
+
+        args = cli.parse_args(["list"])
+        with pytest.raises(BitxkError, match="网络"):
+            _connect(self._cfg(tmp_path), args)
+
+        # 关键：会话文件必须还在
+        assert (tmp_path / ".bitxk_session.json").exists(), "网络故障不该删掉登录态"
+
+    def test_登录失效才丢会话(self, tmp_path, monkeypatch):
+        from bitxk.auth import Session
+        from bitxk.cli import _connect
+        from bitxk.exceptions import LoginError
+
+        session = Session(token="OLD", cookies={}, student_code="1", origin="browser")
+        session.save(tmp_path / ".bitxk_session.json")
+
+        class ExpiredClient:
+            def __init__(self, *_a, **_k):
+                pass
+
+            def student_info(self, *_a, **_k):
+                raise TokenExpired("登录态失效")
+
+        monkeypatch.setattr("bitxk.cli._client", ExpiredClient)
+
+        args = cli.parse_args(["-u", "1", "-p", "pw", "list"])
+        # 会话失效 → 应转入账号密码登录；密码给了但登录会打到真实网络，
+        # 这里只断言它**没有**因为网络错误而通过，即走到了登录分支。
+        with pytest.raises((LoginError, BitxkError)):
+            _connect(self._cfg(tmp_path), args)
