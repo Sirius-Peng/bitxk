@@ -214,11 +214,11 @@ class XkClient:
         url = self._url(path)
         resp = self.http.request(method, url, **kwargs)
 
-        # token 失效有三种实测形态，必须**先判状态码再解析正文**，
-        # 否则 resp.json() 会直接抛异常、连原因都看不到：
-        #   1) HTTP 302 → Location 指向 *default/index.do（带 cookie 时最常见）；
-        #   2) HTTP 401 + text/html "Not login!"（无 cookie 时的网关响应）；
-        #   3) HTTP 200 + 应用首页 HTML（requests 自动跟完 302 后的落点）。
+        # token 失效必须**先判状态码再解析正文**，否则 resp.json() 会直接
+        # 抛异常、连原因都看不到。实测（2026-09，本科系统）会出现三种形态：
+        #   1) HTTP 302 → Location 指向 *default/index.do  ← 当前主流形态
+        #   2) HTTP 401 + text/html "Not login!"（部分端点/版本）
+        #   3) HTTP 200 + 应用首页 HTML（HTTP 客户端自动跟完 302 后的落点）
         if resp.status_code in (301, 302, 303, 307, 308):
             location = resp.headers.get("Location", "") or str(getattr(resp, "url", ""))
 

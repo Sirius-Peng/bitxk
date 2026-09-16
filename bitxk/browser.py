@@ -52,6 +52,10 @@ from .exceptions import BitxkError
 
 logger = logging.getLogger(__name__)
 
+#: 拿到 token 后，允许服务端"缓存未就绪"的宽限秒数。
+#: 超过这个时间仍校验不过，就不再干等，直接把登录态交给上层用真实接口判。
+VERIFY_GRACE = 30.0
+
 __all__ = [
     "BrowserNotFound",
     "BrowserInfo",
@@ -591,11 +595,15 @@ def browser_login(
         → 提取 Cookie + Token
         → 关闭浏览器
 
-    登录成功的判据（满足任一即可）：
+    登录成功的判据（必须拿到实证，不能只看 URL 域名）：
 
-    * 页面回跳地址里出现 ``bitXsxkLogin=<key>`` —— 最可靠；
-    * ``student/<学号>.do`` 能返回数据；
-    * ``sessionStorage`` 里出现了 token。
+    * ``sessionStorage`` 里出现 token（前端登录成功后一定会写），或
+    * 回跳地址里出现 ``bitXsxkLogin=<key>``（CAS 换票成功），
+
+    并且会用 ``student/<学号>.do`` 独立复验一次会话真的可用。
+    注意**不能**用「URL 是否离开 sso.bit.edu.cn」来判断 —— SSO 页面的
+    ``?service=`` 参数里就含 ``bit.edu.cn``，那个判据在用户还没输密码时
+    就会成立（实测踩过这个坑）。
 
     Args:
         api_base: 选课系统接口基址。
@@ -684,71 +692,21 @@ def browser_login(
             session.cleanup_profile()
 
 
-def _wait_for_login(
-    session: ChromiumSession,
-    *,
-    api_base: str,
-    student_code: str,
-    timeout: float,
-    on_progress,
-) -> tuple[dict[str, str], str, str, str] | None:
-    """轮询浏览器，直到确认登录成功。
-
-    Returns:
-        ``(cookies, token, login_key, url)``；超时返回 ``None``。
-    """
-    import re
-
-    deadline = time.time() + timeout
-    announced = False
-    last_url = ""
-
-    while time.time() < deadline:
-        url = session.current_url()
-        if url and url != last_url:
-            last_url = url
-            logger.debug("当前页面：%s", url[:120])
-
-        # 判据 1：回跳 URL 里带了选课系统的会话凭据
-        match = re.search(r"[?&]bitXsxkLogin=([^&#\s]+)", url or "")
-        key = match.group(1) if match else ""
-
-        # 只要离开了统一身份认证域，就说明登录动作已经完成
-        left_sso = bool(url) and "sso.bit.edu.cn" not in url and "bit.edu.cn" in url
-        if left_sso and not announced:
-            announced = True
-            on_progress("检测到已登录，正在提取登录态…")
-
-        # 判据 2：sessionStorage 里已有 token（前端登录成功后一定会写）
-        token = session.storage_get(_TOKEN_STORAGE_KEY)
-
-        # 判据 3：学生信息接口能通
-        if not token and left_sso:
-            token = _probe_token_via_register(session, key)
-
-        if token:
-            cookies = session.get_cookies("https://xk.bit.edu.cn")
-            if not cookies:
-                cookies = session.get_cookies()
-            return cookies, token, key, url
-
-        time.sleep(1.5)
-
-    return None
-
-
 def probe_student_identity(
     session, *, student_code: str = "", api_base: str = ""
 ) -> tuple[str, str]:
     """校验登录态并取回 ``(姓名, 学号)``。
 
-    用 ``student/<学号>.do`` 验一次，能同时确认 token 真的可用、
-    并拿到姓名。拿不到就返回空串，不影响调用方继续。
+    用 ``student/<学号>.do`` 验一次：它未登录时返回 302、登录后返回学生信息，
+    所以既能确认 token 真的可用，又能顺手拿到姓名与学号。
 
     Args:
         session: :class:`bitxk.auth.Session`。
         student_code: 已知学号；为空时用 ``session.student_code``。
         api_base: 选课系统接口基址，默认用 :data:`bitxk.auth.API_BASE`。
+
+    Returns:
+        ``(姓名, 学号)``；探不到就返回空串，不影响调用方继续。
     """
     from .auth import API_BASE
     from .client import XkClient
@@ -772,6 +730,159 @@ def probe_student_identity(
         return "", ""
     finally:
         http.close()
+
+
+def _wait_for_login(
+    session: ChromiumSession,
+    *,
+    api_base: str,
+    student_code: str,
+    timeout: float,
+    on_progress,
+) -> tuple[dict[str, str], str, str, str] | None:
+    """轮询浏览器，直到确认登录成功。
+
+    **关键教训（实测踩过）**：不要用「URL 是否离开 sso.bit.edu.cn」来判断登录完成。
+    SSO 登录页自身的 URL 里带着
+    ``?service=https%3A%2F%2Fxk.bit.edu.cn%2F...`` ——
+    那个 service 参数里就含 ``bit.edu.cn``，于是「离开 SSO 域」这个判据在
+    **用户还没输密码时就会成立**，导致脚本误报"已登录"并拿一个空 token 去换票。
+
+    现在的判据只有两条，都必须有**实证**：
+
+    1. URL 上出现 ``bitXsxkLogin=<key>`` —— CAS 回跳成功；
+    2. ``sessionStorage`` 里出现 token —— 前端登录成功后一定会写。
+       拿不到 token 但有回跳 key 时，再用 ``register.do`` 换一次。
+       注意 ``register.do`` 本身**不校验会话**（无效 key 也返回 JSON 错误），
+       所以它只能用来"换票"，不能用来"验证是否已登录"。
+
+    另外会独立探一次 ``student/<学号>.do``：未登录时它返回 302，登录后返回学生信息。
+    这是唯一能确定"会话真的可用"的判据。
+
+    Returns:
+        ``(cookies, token, login_key, url)``；超时返回 ``None``。
+    """
+    import re
+
+    deadline = time.time() + timeout
+    announced = False
+    last_url = ""
+    #: 第一次拿到 token 的时刻。用来给会话校验留宽限期 ——
+    #: 实测：登录刚完成时 token 已经写进 sessionStorage，但服务端侧可能
+    #: 还没完全就绪（这套系统的选课处理本身就是异步确认的），此刻立刻
+    #: 校验会失败。所以"校验不过"要重试，而不是立刻放弃。
+    first_token_at: float | None = None
+    #: 是否已经提示过"残留的是失效登录态"，避免反复刷屏
+    stale_reported = False
+
+    while time.time() < deadline:
+        url = session.current_url()
+        if url and url != last_url:
+            last_url = url
+            logger.debug("当前页面：%s", url[:120])
+
+        # 判据 1：回跳 URL 里带了选课系统的会话凭据
+        match = re.search(r"[?&]bitXsxkLogin=([^&#\s]+)", url or "")
+        key = match.group(1) if match else ""
+
+        # 判据 2：sessionStorage 里的 token（前端登录成功后一定会写）
+        token = session.storage_get(_TOKEN_STORAGE_KEY)
+        if not token and key:
+            token = _probe_token_via_register(session, key)
+
+        if token:
+            if first_token_at is None:
+                first_token_at = time.time()
+            # 本轮才第一次报"检测到已登录"吗？用来决定要不要再补一句校验结果，
+            # 免得正常路径下连着刷两条意思相近的提示。
+            just_announced = not announced
+            if just_announced:
+                announced = True
+                on_progress("检测到已登录，正在提取登录态…")
+
+            # 独立验证会话真的可用（未登录时 student/<学号>.do 会 302）
+            if _session_usable(session, api_base, student_code):
+                cookies = session.get_cookies("https://xk.bit.edu.cn") or session.get_cookies()
+                if not just_announced:
+                    on_progress("登录态校验通过")
+                return cookies, token, key, url
+
+            waited = time.time() - first_token_at
+            if waited < VERIFY_GRACE:
+                # 还在宽限期内：服务端可能尚未就绪，继续等
+                logger.debug("会话校验未通过（已等 %.0fs），继续重试", waited)
+                time.sleep(1.5)
+                continue
+
+            # 宽限期过了仍验不过：这份登录态是**失效的**（实测：Chrome 持久
+            # profile 里常残留上一次登录留下的 token，页面一打开 URL 就带着
+            # 旧的 bitXsxkLogin，但服务端早已不认）。
+            # 绝不能把它当成功交出去 —— 那样用户会看到"登录成功"并缓存下来，
+            # 等到抢课时才发现根本用不了。正确做法是清掉陈旧状态，
+            # 继续等用户在窗口里真正登录一次。
+            if not stale_reported:
+                stale_reported = True
+                logger.debug("检测到失效的陈旧登录态，已清除")
+                on_progress(
+                    "浏览器里残留的是已失效的旧登录态，已清除；请在浏览器窗口中重新登录一次…"
+                )
+                _clear_stale_state(session)
+                # 重置计时，给用户重新登录留出完整的时间窗口
+                first_token_at = time.time()
+            time.sleep(1.5)
+            continue
+
+        time.sleep(1.5)
+
+    return None
+
+
+def _clear_stale_state(session: ChromiumSession) -> None:
+    """清掉页面里残留的失效登录态，让用户重新登录时能干净地开始。
+
+    只动 ``sessionStorage`` 里的凭据并把地址上的旧 ``bitXsxkLogin`` 参数去掉，
+    不碰 cookie —— cookie 由服务端下发，乱清可能反而干扰登录流程。
+    """
+    with contextlib.suppress(Exception):
+        session.eval(
+            "try {"
+            " sessionStorage.removeItem('token');"
+            " sessionStorage.removeItem('studentInfo');"
+            " sessionStorage.removeItem('currentBatch');"
+            " location.replace(location.pathname + '?timestamp=' + Date.now());"
+            "} catch (e) {}"
+        )
+
+
+def _session_usable(session: ChromiumSession, api_base: str, student_code: str) -> bool:
+    """在浏览器里探一次 ``student/<学号>.do``，确认会话真的可用。
+
+    未登录时该端点返回 302 跳首页；已登录时返回学生信息 JSON。
+    不知道学号就跳过校验（返回 True），避免把正常流程卡死。
+    """
+    if not student_code:
+        return True
+
+    base = api_base.rstrip("/")
+    script = (
+        "(async () => {"
+        "  try {"
+        f"    const r = await fetch('{base}/student/{student_code}.do?timestamp=' + Date.now(),"
+        "      {credentials: 'include', redirect: 'manual'});"
+        "    if (r.type === 'opaqueredirect' || r.status === 0) return 'REDIRECT';"
+        "    if (r.status !== 200) return 'HTTP' + r.status;"
+        "    const t = await r.text();"
+        "    if (t.trim().startsWith('{')) {"
+        "      const j = JSON.parse(t);"
+        "      return (j && j.code === '1' && j.data) ? 'OK' : 'CODE' + (j && j.code);"
+        "    }"
+        "    return 'HTML';"
+        "  } catch (e) { return 'ERR'; }"
+        "})()"
+    )
+    result = session.eval(script, timeout=20.0)
+    logger.debug("会话校验结果：%s", result)
+    return str(result) == "OK"
 
 
 def _probe_token_via_register(session: ChromiumSession, login_key: str) -> str:

@@ -65,6 +65,7 @@ CAS_SERVICE_URL = f"{XK_BASE}/sys/xsxkapp/bitXsxkLogin/casLogin.do"
 API_BASE = f"{XK_BASE}/sys/xsxkapp"
 """业务接口基址。"""
 
+
 def normalize_base_url(url: str) -> str:
     """把用户可能填错/粘贴错的地址统一成可用的 HTTPS 基址。
 
@@ -558,6 +559,21 @@ class BitAuth:
                 raise LoginError(
                     f"登录成功但未取得选课凭证，且该账号无学籍信息（{msg or code}）。"
                     "请确认使用的是本科生账号。"
+                )
+
+            # 实测：没有有效回跳凭据时，register.do 会返回
+            # {"data":null,"msg":"单点登录用户登记失败","code":"0"}。
+            # 这通常意味着浏览器那边的登录态没走完，或已经失效 —— 给出可操作的提示。
+            if "登记失败" in msg or "单点登录" in msg:
+                raise LoginError(
+                    f"换取选课凭证失败：{msg or code}。\n"
+                    "  常见原因：\n"
+                    "  1. 浏览器窗口里的登录还没完成就关掉了 —— 请重新运行，\n"
+                    "     等页面跳到选课系统首页再关闭；\n"
+                    "  2. 该统一身份认证会话已失效 —— 重新登录一次即可；\n"
+                    "  3. 若反复失败，改用命令行兜底：\n"
+                    "     浏览器 F12 → Network → 点一次选课 → 复制 Token 与 Cookie，\n"
+                    "     然后 bitxk grab --student-code <学号> --token '...' --cookie '...'"
                 )
             raise LoginError(f"换取 token 失败：code={code} msg={msg}")
 

@@ -836,7 +836,9 @@ class TestBaseUrlHandling:
                 None,
                 status_code=302,
                 text="",
-                headers={"Location": "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/elective/publicCourse.do"},
+                headers={
+                    "Location": "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/elective/publicCourse.do"
+                },
                 url="http://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/elective/publicCourse.do",
             ),
             envelope(dataList=[]),  # 重发后的正常响应

@@ -116,6 +116,37 @@ bitxk --list-browsers
 登录态会缓存在 `~/.bitxk/chrome-profile`（浏览器 profile）和
 `config.toml` 同目录的 `.bitxk_session.json`（会话）。删掉它们就相当于退出登录。
 
+#### 登录判据不能看 URL 域名（实测踩过）
+
+一个很容易写错的地方：**不要用"URL 是否离开 `sso.bit.edu.cn`"来判断登录完成**。
+
+SSO 登录页自身的地址里就带着 service 参数：
+
+```
+https://sso.bit.edu.cn/cas/login?service=https%3A%2F%2Fxk.bit.edu.cn%2Fxsxkapp%2F...
+                                    ↑ 这里就含 bit.edu.cn
+```
+
+于是"离开 SSO 域"这个判据在**用户还没输密码时就会成立**，脚本会误报
+"已登录"并拿一个空 token 去换票。
+
+现在的判据只有两类，且都要求**实证**：
+
+1. `sessionStorage` 里出现 `token`（前端登录成功后一定会写），或
+2. 回跳地址里出现 `bitXsxkLogin=<key>`（CAS 换票成功），
+
+并且会用 `student/<学号>.do` 独立复验一次会话真的可用
+（未登录时该端点返回 302、登录后返回学生信息）。
+
+#### 残留的失效登录态会被清除
+
+Chrome 的持久 profile 会保留上次登录留下的 `sessionStorage.token`，
+页面一打开 URL 就可能带着旧的 `bitXsxkLogin`。**这份登录态往往已经失效**。
+
+工具的处理：复验不过就先给 30 秒宽限期（服务端可能尚未就绪），
+仍然不过就判定为陈旧状态 —— 清除它、提示重新登录，而**不会**当成成功
+缓存下来。否则用户会看到假的"登录成功"，等到抢课时才发现用不了。
+
 ### 1.1 自动 SSO 登录的链路
 
 如果你选择不开浏览器、直接填账号密码，走的是下面这条链路。

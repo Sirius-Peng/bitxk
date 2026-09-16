@@ -271,7 +271,7 @@ class Config:
         if require_account and not self.username:
             raise ConfigError(
                 "未配置学号。请在 config.toml 的 [account] 段填写 username，",
-                "或设置环境变量 BITXK_USERNAME。"
+                "或设置环境变量 BITXK_USERNAME。",
             )
         if not self.courses:
             raise ConfigError("未配置任何课程。请在 config.toml 里添加 [[courses]] 段。")

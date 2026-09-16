@@ -332,3 +332,110 @@ class TestLiveBrowser:
         finally:
             session.close()
             session.cleanup_profile()
+
+
+class TestStaleSessionHandling:
+    """持久 profile 里残留的失效登录态 —— 实测踩过的坑。
+
+    Chrome 的持久 profile 会保留上一次登录留下的 ``sessionStorage.token``，
+    页面一打开 URL 就可能带着旧的 ``bitXsxkLogin``。如果只看这两者就判定
+    "已登录"，用户会看到假的"登录成功"并被缓存下来，等到抢课时才发现
+    根本用不了。所以必须用 ``student/<学号>.do`` 复验，验不过要清除重来。
+    """
+
+    def _make_session(self, *, token, usable_results):
+        """造一个假浏览器会话：给定 token 与逐次校验结果。"""
+        calls = {"eval": [], "n": 0}
+
+        class FakeSession:
+            def current_url(self):
+                return (
+                    "https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"
+                    "?bitXsxkLogin=STALEKEY"
+                )
+
+            def storage_get(self, key, kind="session"):
+                return token
+
+            def eval(self, expression, **kwargs):
+                calls["eval"].append(expression)
+                if "removeItem" in expression:
+                    return None
+                # 模拟 student/<学号>.do 的探测结果
+                idx = min(calls["n"], len(usable_results) - 1)
+                calls["n"] += 1
+                return usable_results[idx]
+
+            def get_cookies(self, url=None):
+                return {"route": "abc"}
+
+        return FakeSession(), calls
+
+    def test_陈旧登录态被识别并清除而不是当成成功(self, monkeypatch):
+        from bitxk import browser as bmod
+
+        # 校验一直返回 REDIRECT（服务端不认这份 token）
+        session, calls = self._make_session(token="STALE", usable_results=["REDIRECT"])
+        monkeypatch.setattr(bmod, "VERIFY_GRACE", 0.5)
+
+        progress: list[str] = []
+        result = bmod._wait_for_login(
+            session,
+            api_base="https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp",
+            student_code="1120200001",
+            timeout=3.0,
+            on_progress=progress.append,
+        )
+
+        assert result is None, "失效的登录态绝不能被当成成功返回"
+        assert any("失效" in m for m in progress), f"应提示陈旧状态：{progress}"
+        assert any("removeItem" in e for e in calls["eval"]), "应清除陈旧的 sessionStorage"
+
+    def test_有效登录态正常返回(self, monkeypatch):
+        from bitxk import browser as bmod
+
+        session, _ = self._make_session(token="GOOD", usable_results=["OK"])
+        result = bmod._wait_for_login(
+            session,
+            api_base="https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp",
+            student_code="1120200001",
+            timeout=5.0,
+            on_progress=lambda _m: None,
+        )
+        assert result is not None
+        cookies, token, key, _url = result
+        assert token == "GOOD"
+        assert key == "STALEKEY"
+        assert cookies == {"route": "abc"}
+
+    def test_服务端延迟就绪时会重试而不是立刻放弃(self, monkeypatch):
+        """登录刚完成时服务端可能还没就绪，应重试到成功。"""
+        from bitxk import browser as bmod
+
+        session, _ = self._make_session(token="GOOD", usable_results=["REDIRECT", "REDIRECT", "OK"])
+        result = bmod._wait_for_login(
+            session,
+            api_base="https://xk.bit.edu.cn/xsxkapp/xsxkapp",
+            student_code="1120200001",
+            timeout=10.0,
+            on_progress=lambda _m: None,
+        )
+        assert result is not None, "前两次验不过、第三次成功时应返回成功"
+
+    def test_不知道学号时不做会话校验(self):
+        """没学号就没法构造探测地址，此时不应把流程卡死。"""
+        from bitxk import browser as bmod
+
+        class FakeSession:
+            def eval(self, expression, **kwargs):
+                raise AssertionError("不该发起探测")
+
+        assert bmod._session_usable(FakeSession(), "https://x", "") is True
+
+    def test_连续两次运行都从干净状态开始(self):
+        """清除陈旧状态后再跑一次，不应重复提示（stale_reported 生效）。"""
+        import inspect
+
+        src = inspect.getsource(__import__("bitxk.browser", fromlist=["x"])._wait_for_login)
+        assert "stale_reported" in src
+        assert src.count("stale_reported = True") == 1
