@@ -512,12 +512,16 @@ def browser_login_session(cfg: Config, args, *, on_progress=None) -> Session:
         timeout=float(timeout),
         on_progress=progress,
     )
-    who = result.student_name or result.student_code or "（未知）"
-    log_ok(f"已从浏览器取得登录态：{who}")
+    who = result.student_name or "（未知）"
+    code = result.session.student_code or "（未取到学号）"
+    log_ok(f"已从浏览器取得登录态：{who}（{code}）")
+    log("  学号与姓名是自动从页面里读出来的，无需再手工指定 --student-code")
+
     if not result.session.student_code:
         raise ConfigError(
-            "取到了登录态但拿不到学号。请用 --student-code 指定学号"
-            "（批次接口形如 student/<学号>.do）。"
+            "取到了登录态但没能读到学号。\n"
+            "  请在浏览器窗口里等页面完全加载（能看到「开始选课」按钮）后重试；\n"
+            "  或用 --student-code 手动指定。"
         )
     return result.session
 
@@ -540,6 +544,17 @@ def _manual_session(args, cfg: Config) -> Session | None:
     return session
 
 
+def _has_usable_session(cfg: Config, args) -> bool:
+    """是否已有可用的登录态（缓存会话 / 手动导入 / 浏览器登录）。
+
+    有的话就不该再要求 config.toml 里填学号 —— 学号能从会话里拿到。
+    """
+    if _use_browser_login(args) or getattr(args, "token", None) or getattr(args, "cookie", None):
+        return True
+    cached = Session.load(cfg.base_dir / cfg.session_file)
+    return bool(cached and cached.token and cached.student_code)
+
+
 def _use_browser_login(args) -> bool:
     """是否走浏览器登录取登录态。"""
     return getattr(args, "browser", None) is not None
@@ -554,9 +569,13 @@ def _has_manual_session(args) -> bool:
 
 def _connect(cfg: Config, args, *, need_login: bool = True) -> tuple[HttpClient, XkClient, Session]:
     """装配 HttpClient / XkClient / Session。"""
-    # 浏览器登录与手动导入都不需要账号密码，因此不校验 account 段
+    # 以下三种情况都不需要配置里的账号密码，因此不校验 account 段：
+    #   1. 浏览器登录（--browser / browser-login）
+    #   2. 手动导入（--token / --cookie）
+    #   3. 本地已缓存了可用会话（学号能从会话里拿到）
     manual = _manual_session(args, cfg)
-    cfg.validate(require_account=manual is None and not _use_browser_login(args))
+    cached_session = Session.load(cfg.base_dir / cfg.session_file)
+    cfg.validate(require_account=not _has_usable_session(cfg, args))
     http = _build_http(cfg)
 
     if _use_browser_login(args):
@@ -574,9 +593,16 @@ def _connect(cfg: Config, args, *, need_login: bool = True) -> tuple[HttpClient,
             http.student_code = manual.student_code
         return http, _client(cfg, http), manual
 
-    # 复用缓存会话（仅在未显式要求重新登录时）
-    cached = Session.load(cfg.base_dir / cfg.session_file)
-    if cached and cached.is_probably_fresh() and not args.password and not args.username:
+    # 复用本地缓存的登录态。
+    #
+    # 注意两个坑（都实测踩过）：
+    #   1. 不能因为"用户传了 --username 或配置里有学号"就跳过复用 ——
+    #      浏览器登录后就该直接复用缓存，跟有没有学号无关。旧实现要求
+    #      not args.username，而学号是从配置读出来的、恒为真，于是永远
+    #      跳过复用，每次都去要求密码。
+    #   2. 不要用"会话年龄"来预判新鲜度 —— 本地时间不可靠，服务端才是
+    #      权威。直接拿它试一次接口，失败再登录，这样最稳。
+    if cached_session and cached_session.token:
         probe = HttpClient(
             min_interval=cfg.poll.min_request_interval,
             timeout=cfg.http.timeout,
@@ -584,21 +610,30 @@ def _connect(cfg: Config, args, *, need_login: bool = True) -> tuple[HttpClient,
             verify=cfg.http.verify_ssl,
             proxy=cfg.http.proxy or None,
         )
-        probe.cookies = cached.cookies
-        probe.set_token(cached.token)
+        probe.cookies = cached_session.cookies
+        probe.set_token(cached_session.token)
+        probe.student_code = cached_session.student_code
         try:
-            _client(cfg, probe).student_info()
-        except BitxkError:
-            logger.debug("缓存会话已失效，改为重新登录")
+            _client(cfg, probe).student_info(cached_session.student_code)
+        except BitxkError as exc:
+            logger.debug("缓存会话已失效（%s），改为重新登录", exc)
         else:
-            log_ok(f"复用本地缓存会话（{cached.student_name or cached.student_code}）")
-            return probe, _client(cfg, probe), cached
+            log_ok(
+                f"复用本地缓存会话（{cached_session.student_name or cached_session.student_code}）"
+            )
+            return probe, _client(cfg, probe), cached_session
         finally:
             if probe is not http:
                 probe.close()
 
     if not need_login:
         return http, _client(cfg, http), Session(token="")
+
+    # 走到这里说明要真正登录；若配置里没学号而缓存会话里有，就补上，
+    # 免得后面拿不到 studentCode 而无从查询
+    session_hint = cached_session.student_code if cached_session else ""
+    if not cfg.username and session_hint:
+        cfg.username = session_hint
 
     _resolve_credentials(cfg, args)
     auth = _build_auth(cfg, http, args)
@@ -772,7 +807,8 @@ def cmd_browser_login(args) -> int:
         try:
             info = client.student_info(session.student_code)
             name = info.get("name") or session.student_name
-            log(f"  身份：{name}（{session.student_code}）")
+            campus = info.get("campusName") or ""
+            log(f"  身份：{name}（{session.student_code}）{campus}")
             for batch in client.batches(session.student_code):
                 marker = Style.green("  ← 当前可选") if batch.can_select else ""
                 log(f"  {batch}{marker}")
@@ -785,7 +821,7 @@ def cmd_browser_login(args) -> int:
 
 def cmd_login(args) -> int:
     cfg = load_config(args.config)
-    cfg.validate()
+    cfg.validate(require_account=not _has_usable_session(cfg, args))
     http, client, session = _connect(cfg, args)
     try:
         info = client.student_info()
@@ -802,7 +838,7 @@ def cmd_login(args) -> int:
 
 def cmd_list(args) -> int:
     cfg = load_config(args.config)
-    cfg.validate()
+    cfg.validate(require_account=not _has_usable_session(cfg, args))
     http, client, session = _connect(cfg, args)
     try:
         batch = client.current_batch()
@@ -856,7 +892,7 @@ def cmd_grab(args) -> int:
         cfg.notify.stop_on_success = False
 
     manual = _manual_session(args, cfg)
-    cfg.validate(require_account=manual is None and not _use_browser_login(args))
+    cfg.validate(require_account=not _has_usable_session(cfg, args))
 
     http: HttpClient | None = None
     try:

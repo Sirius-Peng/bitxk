@@ -343,8 +343,11 @@ class TestStaleSessionHandling:
     根本用不了。所以必须用 ``student/<学号>.do`` 复验，验不过要清除重来。
     """
 
-    def _make_session(self, *, token, usable_results):
-        """造一个假浏览器会话：给定 token 与逐次校验结果。"""
+    def _make_session(self, *, token, usable_results, student_info='{"code":"1120200001"}'):
+        """造一个假浏览器会话：给定 token 与逐次校验结果。
+
+        ``student_info`` 传 ``None`` 表示页面里没有登录标记（陈旧残留）。
+        """
         calls = {"eval": [], "n": 0}
 
         class FakeSession:
@@ -355,6 +358,8 @@ class TestStaleSessionHandling:
                 )
 
             def storage_get(self, key, kind="session"):
+                if key == "studentInfo":
+                    return student_info
                 return token
 
             def eval(self, expression, **kwargs):
@@ -371,11 +376,17 @@ class TestStaleSessionHandling:
 
         return FakeSession(), calls
 
-    def test_陈旧登录态被识别并清除而不是当成成功(self, monkeypatch):
+    def test_页面无登录标记时判为陈旧并清除(self, monkeypatch):
+        """只有 token、没有 studentInfo —— 这才是真正可疑的残留状态。
+
+        Chrome 持久 profile 会留下上次登录的 sessionStorage。若页面没能
+        拿到 studentInfo，说明前端并未完成登录初始化，应清除重来。
+        """
         from bitxk import browser as bmod
 
-        # 校验一直返回 REDIRECT（服务端不认这份 token）
-        session, calls = self._make_session(token="STALE", usable_results=["REDIRECT"])
+        session, calls = self._make_session(
+            token="STALE", usable_results=["REDIRECT"], student_info=None
+        )
         monkeypatch.setattr(bmod, "VERIFY_GRACE", 0.5)
 
         progress: list[str] = []
@@ -387,9 +398,35 @@ class TestStaleSessionHandling:
             on_progress=progress.append,
         )
 
-        assert result is None, "失效的登录态绝不能被当成成功返回"
-        assert any("失效" in m for m in progress), f"应提示陈旧状态：{progress}"
-        assert any("removeItem" in e for e in calls["eval"]), "应清除陈旧的 sessionStorage"
+        assert result is None, "没有页面登录标记时不该当成成功"
+        assert any("陈旧" in m or "旧登录态" in m for m in progress), progress
+        assert any("removeItem" in e for e in calls["eval"]), "应清除残留的 sessionStorage"
+
+    def test_页面标记齐全时即便探针失败也接受(self, monkeypatch):
+        """实证教训：接口探针在页面刚落地时会误失败，不能据此判失效。
+
+        真机上 casLogin 跳转刚落地时调接口会失败，但页面里
+        studentInfo / token 都在 —— 这份登录态其实是有效的。
+        早期版本因此把有效登录态误判成失效，用户看到"已登录却说未登录"。
+        """
+        from bitxk import browser as bmod
+
+        session, _ = self._make_session(
+            token="GOOD",
+            usable_results=["REDIRECT"],  # 探针一直失败
+            student_info='{"code":"1120252751","name":"张三"}',  # 但页面标记齐全
+        )
+        monkeypatch.setattr(bmod, "VERIFY_GRACE", 0.5)
+
+        result = bmod._wait_for_login(
+            session,
+            api_base="https://xk.bit.edu.cn/xsxkapp/sys/xsxkapp",
+            student_code="1120252751",
+            timeout=5.0,
+            on_progress=lambda _m: None,
+        )
+        assert result is not None, "页面标记齐全时应接受这份登录态"
+        assert result[1] == "GOOD"
 
     def test_有效登录态正常返回(self, monkeypatch):
         from bitxk import browser as bmod
@@ -422,13 +459,44 @@ class TestStaleSessionHandling:
         )
         assert result is not None, "前两次验不过、第三次成功时应返回成功"
 
-    def test_不知道学号时不做会话校验(self):
-        """没学号就没法构造探测地址，此时不应把流程卡死。"""
+    def test_学号可从页面读取时不再跳过校验(self):
+        """回归防线：没传学号也要先去页面里找，而不是直接放行。
+
+        实测踩过：调用方没给 --student-code，_session_usable 就直接
+        返回 True，等于永久跳过校验，失效登录态被当成有效。
+        """
+        from bitxk import browser as bmod
+
+        probes: list[str] = []
+
+        class FakeSession:
+            def storage_get(self, key, kind="session"):
+                if key == "studentInfo":
+                    return '{"code":"1120252751","name":"张三"}'
+                if key == "token":
+                    return "TOK"
+                return None
+
+            def eval(self, expression, **kwargs):
+                probes.append(expression)
+                if "studentInfo" in expression or "removeItem" in expression:
+                    return None
+                # student/<学号>.do 探针：返回可用
+                return "OK" if "student/1120252751.do" in expression else None
+
+        assert bmod._session_usable(FakeSession(), "https://x", "") is True
+        assert any("1120252751" in p for p in probes), "应该用页面里读到的学号去探测"
+
+    def test_页面也读不到学号才放行(self):
+        """连页面里都没有学号时，不能把流程卡死。"""
         from bitxk import browser as bmod
 
         class FakeSession:
+            def storage_get(self, key, kind="session"):
+                return None
+
             def eval(self, expression, **kwargs):
-                raise AssertionError("不该发起探测")
+                return None
 
         assert bmod._session_usable(FakeSession(), "https://x", "") is True
 
@@ -439,3 +507,170 @@ class TestStaleSessionHandling:
         src = inspect.getsource(__import__("bitxk.browser", fromlist=["x"])._wait_for_login)
         assert "stale_reported" in src
         assert src.count("stale_reported = True") == 1
+
+
+class TestCookiePathScoping:
+    """cookie 提取必须覆盖路径受限的 cookie —— 实测踩过的大坑。
+
+    选课系统三个关键 cookie 的 path 是 ``/xsxkapp``：
+
+        JSESSIONID    /xsxkapp
+        GS_SESSIONID  /xsxkapp/
+        _WEU          /xsxkapp/     ← 鉴权必需
+
+    用 ``Network.getCookies(urls=["https://xk.bit.edu.cn"])`` 取，会因为
+    按路径匹配而**只返回 route**，漏掉上面三个。结果就是浏览器里明明登着，
+    工具拿到的 cookie 却请求一律 302 —— 表现为"已登录被当成未登录"。
+    """
+
+    def test_不带_urls时全量取回(self):
+        from pathlib import Path
+
+        from bitxk.browser import BrowserInfo, ChromiumSession
+
+        captured: dict = {}
+
+        class FakeSession(ChromiumSession):
+            def _call(self, method, params=None, timeout=20.0):
+                captured["method"] = method
+                captured["params"] = params
+                return {
+                    "cookies": [
+                        {
+                            "name": "JSESSIONID",
+                            "value": "j",
+                            "domain": "xk.bit.edu.cn",
+                            "path": "/xsxkapp",
+                            "httpOnly": True,
+                        },
+                        {
+                            "name": "GS_SESSIONID",
+                            "value": "g",
+                            "domain": "xk.bit.edu.cn",
+                            "path": "/xsxkapp/",
+                            "httpOnly": True,
+                        },
+                        {
+                            "name": "_WEU",
+                            "value": "w",
+                            "domain": "xk.bit.edu.cn",
+                            "path": "/xsxkapp/",
+                        },
+                        {"name": "route", "value": "r", "domain": "xk.bit.edu.cn", "path": "/"},
+                        {
+                            "name": "SESSION",
+                            "value": "s",
+                            "domain": "sso.bit.edu.cn",
+                            "path": "/cas/",
+                        },
+                    ]
+                }
+
+        session = FakeSession(BrowserInfo("fake", Path("/bin/sh"), "test"))
+        cookies = session.get_cookies("https://xk.bit.edu.cn")
+
+        # 必须拿到全部四个 xk 域下的 cookie，且不含 sso 域的
+        assert set(cookies) == {"JSESSIONID", "GS_SESSIONID", "_WEU", "route"}
+        assert "SESSION" not in cookies, "不该混入其它域名的 cookie"
+        # 关键：调用时不能传 urls（那会触发路径匹配）
+        assert not captured["params"] or "urls" not in captured["params"]
+
+    def test_按域名过滤(self):
+        from pathlib import Path
+
+        from bitxk.browser import BrowserInfo, ChromiumSession
+
+        class FakeSession(ChromiumSession):
+            def _call(self, method, params=None, timeout=20.0):
+                return {
+                    "cookies": [
+                        {"name": "A", "value": "1", "domain": "xk.bit.edu.cn"},
+                        {"name": "B", "value": "2", "domain": ".bit.edu.cn"},
+                        {"name": "C", "value": "3", "domain": "evil.com"},
+                    ]
+                }
+
+        session = FakeSession(BrowserInfo("fake", Path("/bin/sh"), "test"))
+        got = session.get_cookies("https://xk.bit.edu.cn")
+        assert got == {"A": "1", "B": "2"}, f"域名过滤不对：{got}"
+
+    def test_Storage失败时退回Network(self):
+        from pathlib import Path
+
+        from bitxk.browser import BrowserInfo, ChromiumSession
+        from bitxk.exceptions import BitxkError
+
+        calls: list[str] = []
+
+        class FakeSession(ChromiumSession):
+            def _call(self, method, params=None, timeout=20.0):
+                calls.append(method)
+                if method == "Storage.getCookies":
+                    raise BitxkError("不支持")
+                return {"cookies": [{"name": "R", "value": "x", "domain": "xk.bit.edu.cn"}]}
+
+        session = FakeSession(BrowserInfo("fake", Path("/bin/sh"), "test"))
+        assert session.get_cookies("https://xk.bit.edu.cn") == {"R": "x"}
+        assert calls == ["Storage.getCookies", "Network.getCookies"]
+
+
+class TestStudentSessionExtraction:
+    """学号必须自动从页面读出，不该要求用户手填。"""
+
+    def _session(self, storage: dict, globals_: dict | None = None):
+        class FakeSession:
+            def storage_get(self, key, kind="session"):
+                return storage.get(key)
+
+            def eval(self, expression, **kwargs):
+                return (globals_ or {}).get("uid", "")
+
+        return FakeSession()
+
+    def test_从_studentInfo_读出学号与姓名(self):
+        from bitxk.browser import read_student_session
+
+        s = self._session(
+            {
+                "studentInfo": '{"code":"1120252751","name":"彭煜涵","campus":"2"}',
+                "token": "TOK",
+                "currentBatch": '{"code":"BATCH1"}',
+                "currentCampus": '{"code":"2","name":"良乡校区"}',
+            }
+        )
+        info = read_student_session(s)
+        assert info["code"] == "1120252751"
+        assert info["name"] == "彭煜涵"
+        assert info["token"] == "TOK"
+        assert info["batch"] == "BATCH1"
+        assert info["campus"] == "2"
+
+    def test_兼容_number_与_xh_字段名(self):
+        from bitxk.browser import read_student_session
+
+        assert (
+            read_student_session(self._session({"studentInfo": '{"number":"2025001"}'}))["code"]
+            == "2025001"
+        )
+        assert (
+            read_student_session(self._session({"studentInfo": '{"xh":"2025002"}'}))["code"]
+            == "2025002"
+        )
+
+    def test_studentInfo损坏时不崩(self):
+        from bitxk.browser import read_student_session
+
+        info = read_student_session(self._session({"studentInfo": "{坏掉的 json"}))
+        assert "code" not in info
+
+    def test_页面没写完时退回读全局_uid(self):
+        """uid 是 CAS 凭据（带 ==），不是学号，只有纯数字才采用。"""
+        from bitxk.browser import read_student_session
+
+        assert (
+            read_student_session(self._session({}, {"uid": "1120252751"}))["code"] == "1120252751"
+        )
+        # CAS 凭据形态不该被当学号
+        assert "code" not in read_student_session(
+            self._session({}, {"uid": "5xe5T9gIU8CKUnK3cr8eog=="})
+        )

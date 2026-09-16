@@ -234,7 +234,10 @@ class TeachingClass:
         if direct_remaining is not None:
             self.remaining, self.capacity_source = direct_remaining, "remaining"
         elif capacity is not None and selected is not None:
-            self.remaining, self.capacity_source = capacity - selected, "derived"
+            # 不能出现负数：志愿制下"第一志愿人数"可以超过容量
+            # （实测见到 121/120），余量最小就是 0。
+            self.remaining = max(0, capacity - selected)
+            self.capacity_source = "derived"
         else:
             self.remaining, self.capacity_source = None, "unknown"
 

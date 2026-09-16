@@ -47,6 +47,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .exceptions import BitxkError
 
@@ -514,10 +515,42 @@ class ChromiumSession:
         return str(value) if value not in (None, "") else None
 
     def get_cookies(self, url: str = "https://xk.bit.edu.cn") -> dict[str, str]:
-        """取指定站点下的全部 Cookie（含 HttpOnly）。"""
-        result = self._call("Network.getCookies", {"urls": [url]})
+        """取指定站点下的全部 Cookie。
+
+        .. warning::
+
+           **不要用 ``Network.getCookies(urls=[...])``** —— 它会按 URL 的路径
+           做匹配，只返回能作用于 ``/`` 的 cookie。而选课系统的三个关键
+           cookie 路径是 ``/xsxkapp``：
+
+           ==============  ==============  ==========================
+           cookie           path            作用
+           ==============  ==============  ==========================
+           ``JSESSIONID``  ``/xsxkapp``    会话
+           ``GS_SESSIONID````/xsxkapp/``   会话
+           ``_WEU``        ``/xsxkapp/``   **鉴权必需**
+           ==============  ==============  ==========================
+
+           实测：带 ``urls`` 时只拿到 ``route``，拿去请求接口一律返回 302 ——
+           这正是"浏览器里明明登着，工具却认为没登录"的根因。
+           改为不带 ``urls`` 全量取回，再按域名在本地过滤。
+        """
+        host = urlparse(url).hostname or ""
+
+        # 优先用 Storage.getCookies（浏览器级，不受路径匹配影响）
+        items: list[dict] = []
+        try:
+            items = self._call("Storage.getCookies", {}).get("cookies", []) or []
+        except BitxkError:
+            items = []
+        if not items:
+            items = self._call("Network.getCookies", {}).get("cookies", []) or []
+
         cookies: dict[str, str] = {}
-        for item in result.get("cookies", []) or []:
+        for item in items:
+            domain = str(item.get("domain", "")).lstrip(".")
+            if host and not (domain == host or host.endswith("." + domain)):
+                continue
             name = item.get("name")
             if name:
                 cookies[str(name)] = str(item.get("value", ""))
@@ -670,12 +703,32 @@ def browser_login(
             origin="browser",
         )
 
-        # 学号/姓名很关键（批次接口是 student/<学号>.do），能探到就补上
-        name, code = probe_student_identity(session_obj, student_code=student_code)
-        if code:
-            session_obj.student_code = code
-        if name:
-            session_obj.student_name = name
+        # 学号/姓名必须从页面里取出来 —— 这是本工具所有业务接口的前置条件：
+        #   批次接口是 student/<学号>.do
+        #   查询接口的 data.studentCode 必填
+        # 而前端登录成功后一定会把 studentInfo 写进 sessionStorage，
+        # 里面就带 code（学号）与 name。让调用方手工传 --student-code
+        # 是多余的，也容易传错（实测传错会得到 code="2" "非法请求"）。
+        page_info = read_student_session(session)
+        if page_info.get("code"):
+            session_obj.student_code = str(page_info["code"])
+        if page_info.get("name"):
+            session_obj.student_name = str(page_info["name"])
+
+        # 兜底：页面里没读到就用接口探一次
+        if not session_obj.student_code or not session_obj.student_name:
+            name, code = probe_student_identity(session_obj, student_code=session_obj.student_code)
+            if code:
+                session_obj.student_code = code
+            if name:
+                session_obj.student_name = name
+
+        if not session_obj.student_code:
+            raise BitxkError(
+                "已取到登录态，但没能从页面里读到学号。\\n"
+                "  这通常说明页面还没加载完 —— 请在浏览器窗口里等页面完全打开，\\n"
+                "  确认能看到「开始选课」按钮后重试；或用 --student-code 手动指定。"
+            )
 
         return LoginResult(
             session=session_obj,
@@ -690,6 +743,75 @@ def browser_login(
         session.close()
         if ephemeral:
             session.cleanup_profile()
+
+
+def read_student_session(session: ChromiumSession) -> dict:
+    """从页面里读出当前登录学生的关键信息。
+
+    前端登录成功后会把这些写进 ``sessionStorage``（实测确认）：
+
+    ==================  ==========================================
+    ``token``           业务接口鉴权头
+    ``studentInfo``     学生信息，含 ``code``（学号）、``name``、``campus``
+    ``currentBatch``    当前选课批次，含 ``code``
+    ``currentCampus``   当前校区，含 ``code`` / ``name``
+    ``electiveBatchList`` 全部批次
+    ==================  ==========================================
+
+    这些是**必需**的：批次接口形如 ``student/<学号>.do``，查询接口的
+    ``data.studentCode`` 也是必填。让调用方手填学号既多余又容易错。
+
+    Returns:
+        形如 ``{"token":…, "code":…, "name":…, "campus":…, "batch":…}``
+        的字典；缺失的键不会出现。
+    """
+    import json as _json
+
+    out: dict[str, object] = {}
+
+    def _load(key: str):
+        raw = session.storage_get(key)
+        if not raw:
+            return None
+        try:
+            return _json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+
+    info = _load(_STUDENT_STORAGE_KEY)
+    if isinstance(info, dict):
+        code = info.get("code") or info.get("number") or info.get("xh")
+        name = info.get("name") or info.get("xm")
+        if code:
+            out["code"] = str(code)
+        if name:
+            out["name"] = str(name)
+
+    batch = _load("currentBatch")
+    if isinstance(batch, dict) and batch.get("code"):
+        out["batch"] = str(batch["code"])
+
+    campus = _load("currentCampus")
+    if isinstance(campus, dict) and campus.get("code") not in (None, ""):
+        out["campus"] = str(campus["code"])
+
+    # 页面还没写完 sessionStorage 时，退回读全局变量
+    if "code" not in out:
+        code = session.eval(
+            "(function(){ try {"
+            "  var v = (typeof uid !== 'undefined') ? uid : null;"
+            "  if (!v || v === 'null') return '';"
+            "  return String(v);"
+            "} catch(e){ return ''; } })()"
+        )
+        # uid 是 CAS 回跳凭据（形如 xxx==），不是学号；只有纯数字才当学号用
+        if code and str(code).strip().isdigit():
+            out["code"] = str(code).strip()
+
+    token = session.storage_get(_TOKEN_STORAGE_KEY)
+    if token:
+        out["token"] = token
+    return out
 
 
 def probe_student_identity(
@@ -800,17 +922,36 @@ def _wait_for_login(
                 announced = True
                 on_progress("检测到已登录，正在提取登录态…")
 
-            # 独立验证会话真的可用（未登录时 student/<学号>.do 会 302）
-            if _session_usable(session, api_base, student_code):
+            # 等页面把 sessionStorage 写完（studentInfo / currentBatch 等）。
+            # 这一步很关键：casLogin 跳转刚落地时前端还没初始化完，此刻去调
+            # 接口会失败 —— 早期版本因为立刻探测，把**有效的**登录态误判成
+            # 了陈旧状态（实测踩过）。
+            page_ready = _wait_page_ready(session, timeout=20.0)
+
+            # 接口探针只当**正向信号**：探通了立刻返回（更快）；
+            # 探不通也不据此判失效 —— 让真正的业务请求做最终裁判。
+            if page_ready and _session_usable(session, api_base, student_code):
                 cookies = session.get_cookies("https://xk.bit.edu.cn") or session.get_cookies()
                 if not just_announced:
                     on_progress("登录态校验通过")
                 return cookies, token, key, url
 
+            # 页面登录标记齐全就接受。这里**只认 page_ready（即 studentInfo
+            # 存在）**，不把 URL 上的 bitXsxkLogin 单独当证据 —— 用户可能把
+            # 带 key 的地址存成书签，之后会话早已过期，光看 key 会误判。
+            # studentInfo 是前端登录成功后必定写入的，最可靠。
+            if page_ready:
+                cookies = session.get_cookies("https://xk.bit.edu.cn") or session.get_cookies()
+                logger.debug(
+                    "页面标记已就绪（studentInfo=%s, key=%s），接口探针未通过，交上层判定",
+                    bool(session.storage_get(_STUDENT_STORAGE_KEY)),
+                    bool(key),
+                )
+                return cookies, token, key, url
+
             waited = time.time() - first_token_at
             if waited < VERIFY_GRACE:
-                # 还在宽限期内：服务端可能尚未就绪，继续等
-                logger.debug("会话校验未通过（已等 %.0fs），继续重试", waited)
+                logger.debug("页面尚未就绪（已等 %.0fs），继续重试", waited)
                 time.sleep(1.5)
                 continue
 
@@ -837,6 +978,24 @@ def _wait_for_login(
     return None
 
 
+def _wait_page_ready(session: ChromiumSession, *, timeout: float = 20.0) -> bool:
+    """等选课系统前端把登录信息写进 ``sessionStorage``。
+
+    通过 CAS 回跳刚落地时页面还在初始化 —— 此时 storage 里可能只有零星
+    几个键，调接口也会失败。这里轮询 ``studentInfo``，拿到即说明前端
+    已完成登录初始化。
+
+    Returns:
+        ``True`` 表示页面已就绪。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if session.storage_get(_STUDENT_STORAGE_KEY):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def _clear_stale_state(session: ChromiumSession) -> None:
     """清掉页面里残留的失效登录态，让用户重新登录时能干净地开始。
 
@@ -858,10 +1017,17 @@ def _session_usable(session: ChromiumSession, api_base: str, student_code: str) 
     """在浏览器里探一次 ``student/<学号>.do``，确认会话真的可用。
 
     未登录时该端点返回 302 跳首页；已登录时返回学生信息 JSON。
-    不知道学号就跳过校验（返回 True），避免把正常流程卡死。
+
+    学号为空时**不能**直接返回 True —— 那样等于跳过校验，会把失效的
+    登录态当成有效（实测踩过：用户没传 --student-code，于是永远"通过"）。
+    改为先从页面里读学号；仍读不到才放行，并留下日志说明原因。
     """
     if not student_code:
-        return True
+        page_info = read_student_session(session)
+        student_code = str(page_info.get("code") or "")
+        if not student_code:
+            logger.debug("拿不到学号，无法会话校验，暂按可用处理")
+            return True
 
     base = api_base.rstrip("/")
     script = (

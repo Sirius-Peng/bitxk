@@ -138,6 +138,33 @@ https://sso.bit.edu.cn/cas/login?service=https%3A%2F%2Fxk.bit.edu.cn%2Fxsxkapp%2
 并且会用 `student/<学号>.do` 独立复验一次会话真的可用
 （未登录时该端点返回 302、登录后返回学生信息）。
 
+#### cookie 必须全量取，不能按 URL 过滤（最容易踩的坑）
+
+用 CDP 的 ``Network.getCookies(urls=[...])`` 取 cookie 时，它会**按路径匹配**，
+只返回能作用于 ``/`` 的那些。而选课系统三个关键 cookie 的 path 是 ``/xsxkapp``：
+
+| cookie | path | 作用 |
+|---|---|---|
+| `JSESSIONID` | `/xsxkapp` | 会话 |
+| `GS_SESSIONID` | `/xsxkapp/` | 会话 |
+| `_WEU` | `/xsxkapp/` | **鉴权必需** |
+
+```
+Network.getCookies(urls=["https://xk.bit.edu.cn"])  →  只有 route    ✗ 漏了三个
+Network.getCookies()（不带 urls）                    →  4 个全都有    ✓
+```
+
+只带 `route` 去请求接口，**一律返回 302** —— 表现出来就是"浏览器里明明登着，
+工具却说未登录"。正确做法是用 `Storage.getCookies` 全量取回，再按域名本地过滤。
+
+#### 学号是自动读出来的
+
+登录成功后前端会把 `studentInfo` 写进 `sessionStorage`，里面有 `code`（学号）、
+`name`、`campusName`；`currentBatch` 里有批次 code；`currentCampus` 里有校区。
+工具会把这些直接读出来，**不需要手工传 `--student-code`**。
+
+（顺带一提：传错学号会得到含糊的 `code="2" "非法请求"`，所以自动读取比手填更可靠。）
+
 #### 残留的失效登录态会被清除
 
 Chrome 的持久 profile 会保留上次登录留下的 `sessionStorage.token`，
