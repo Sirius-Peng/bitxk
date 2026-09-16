@@ -208,6 +208,11 @@ class BitxkApp(ttk.Frame):
         self.session = None
         self._stop_flag = threading.Event()
         self._busy = False
+        #: 课程查询的独立停止信号与运行标记
+        self._query_stop = threading.Event()
+        self._query_running = False
+        #: 当前批次 code（登录/轮询时缓存，查询课程时复用）
+        self._batch_code = ""
 
         self._build_style()
         self._build_widgets()
@@ -249,13 +254,16 @@ class BitxkApp(ttk.Frame):
         self.grid(row=0, column=0, sticky="nsew")
         self.master.rowconfigure(0, weight=1)
         self.master.columnconfigure(0, weight=1)
-        self.columnconfigure(0, weight=3, minsize=340)
-        self.columnconfigure(1, weight=5)
+        # 三栏：任务列表 | 该任务的备选课程 | 全部课程查询
+        self.columnconfigure(0, weight=3, minsize=280)
+        self.columnconfigure(1, weight=4, minsize=320)
+        self.columnconfigure(2, weight=6, minsize=420)
         self.rowconfigure(1, weight=1)
         self.rowconfigure(3, weight=2)
 
         self._build_header()
         self._build_course_panel()
+        self._build_watch_detail_panel()
         self._build_capacity_panel()
         self._build_control_bar()
         self._build_log_panel()
@@ -264,7 +272,7 @@ class BitxkApp(ttk.Frame):
 
     def _build_header(self) -> None:
         bar = ttk.Frame(self, padding=(14, 10))
-        bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        bar.grid(row=0, column=0, columnspan=3, sticky="ew")
         bar.columnconfigure(1, weight=1)
 
         ttk.Label(bar, text="BIT 选课助手", style="Title.TLabel").grid(row=0, column=0, sticky="w")
@@ -284,7 +292,7 @@ class BitxkApp(ttk.Frame):
 
     def _build_course_panel(self) -> None:
         box = ttk.LabelFrame(self, text=" 要盯的课程 ", padding=10)
-        box.grid(row=1, column=0, sticky="nsew", padx=(14, 7), pady=(0, 7))
+        box.grid(row=1, column=0, sticky="nsew", padx=(14, 6), pady=(0, 7))
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
 
@@ -298,6 +306,8 @@ class BitxkApp(ttk.Frame):
         self.course_tree.column("priority", width=60, anchor="center")
         self.course_tree.grid(row=0, column=0, sticky="nsew")
         self.course_tree.bind("<Double-1>", lambda _e: self._on_edit_course())
+        # 选中一门课 → 中间栏显示它的备选教学班
+        self.course_tree.bind("<<TreeviewSelect>>", self._on_watch_selected)
 
         scroll = ttk.Scrollbar(box, orient="vertical", command=self.course_tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
@@ -310,42 +320,193 @@ class BitxkApp(ttk.Frame):
         ttk.Button(buttons, text="删除", command=self._on_delete_course).pack(side="left")
         ttk.Button(buttons, text="保存配置", command=self._on_save_config).pack(side="right")
 
-    # ---------------- 右侧：实时余量 ----------------
+    # ---------------- 中间：所选任务的备选课程详情 ----------------
+
+    def _build_watch_detail_panel(self) -> None:
+        """显示「左侧选中的那门课」有哪些教学班，以及各自容量/已选人数。
+
+        与右侧的区别：右侧是**全部备选课程**的广撒网浏览；这一栏是
+        **我在盯的这门课**到底有几个班、每个班多少人、还差多少 ——
+        决定「值不值得等」看的就是这里。
+        """
+        box = ttk.LabelFrame(self, text=" 该任务的备选教学班 ", padding=10)
+        box.grid(row=1, column=1, sticky="nsew", padx=6, pady=(0, 7))
+        box.columnconfigure(0, weight=1)
+        box.rowconfigure(1, weight=1)
+
+        head = ttk.Frame(box)
+        head.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        self.detail_title_var = tk.StringVar(value="（请先在左侧选一门课）")
+        ttk.Label(head, textvariable=self.detail_title_var, style="Title.TLabel").pack(side="left")
+        self.detail_refresh_btn = ttk.Button(head, text="刷新", command=self._on_refresh_detail)
+        self.detail_refresh_btn.pack(side="right")
+
+        columns = ("class", "teacher", "capacity", "selected", "remaining", "status", "place")
+        self.detail_tree = ttk.Treeview(box, columns=columns, show="headings", height=8)
+        specs = (
+            ("class", "教学班", 130, "center"),
+            ("teacher", "教师", 70, "w"),
+            ("capacity", "容量", 60, "center"),
+            ("selected", "已选", 60, "center"),
+            ("remaining", "余量", 55, "center"),
+            ("status", "状态", 70, "center"),
+            ("place", "时间地点", 150, "w"),
+        )
+        for key, text, width, anchor_x in specs:
+            self.detail_tree.heading(key, text=text)
+            self.detail_tree.column(key, width=width, anchor=anchor_x)
+        self.detail_tree.grid(row=1, column=0, sticky="nsew")
+
+        vscroll = ttk.Scrollbar(box, orient="vertical", command=self.detail_tree.yview)
+        vscroll.grid(row=1, column=1, sticky="ns")
+        self.detail_tree.configure(yscrollcommand=vscroll.set)
+        hscroll = ttk.Scrollbar(box, orient="horizontal", command=self.detail_tree.xview)
+        hscroll.grid(row=2, column=0, sticky="ew")
+        self.detail_tree.configure(xscrollcommand=hscroll.set)
+
+        self.detail_tree.tag_configure("available", foreground=COLORS["success"])
+        self.detail_tree.tag_configure("full", foreground=COLORS["muted"])
+        self.detail_tree.tag_configure("selected", foreground=COLORS["primary"])
+        self.detail_tree.tag_configure("conflict", foreground=COLORS["warning"])
+
+        #: 中间栏当前显示的课程名（用于轮询时同步刷新）
+        self._detail_course: str = ""
+        self._detail_running = False
+
+    # ---------------- 右侧：课程查询与筛选 ----------------
 
     def _build_capacity_panel(self) -> None:
-        box = ttk.LabelFrame(self, text=" 实时余量 ", padding=10)
-        box.grid(row=1, column=1, sticky="nsew", padx=(7, 14), pady=(0, 7))
-        box.rowconfigure(0, weight=1)
-        box.columnconfigure(0, weight=1)
+        """课程浏览器：可查询全部备选课程，并按时段/容量/冲突筛选。
 
-        columns = ("course", "class", "teacher", "capacity", "status", "updated")
+        设计要点：
+
+        * 表格列可点标题排序（课程名 / 教师 / 余量 / 状态）；
+        * 筛选与搜索都在**本地**做，不重新请求 —— 8 个课程类型全查一遍
+          是 8 次请求，不能每敲一个字就重发；
+        * 冲突与已满各自独立勾选，可以「只看有余量」也可以「只看冲突」。
+        """
+        box = ttk.LabelFrame(self, text=" 课程查询（全部备选） ", padding=10)
+        box.grid(row=1, column=2, sticky="nsew", padx=(6, 14), pady=(0, 7))
+        box.columnconfigure(0, weight=1)
+        box.rowconfigure(2, weight=1)
+
+        # ---- 第一行：关键词 + 课程类型 + 查询按钮 ----
+        row1 = ttk.Frame(box)
+        row1.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+
+        ttk.Label(row1, text="关键词").pack(side="left")
+        self.search_var = tk.StringVar()
+        search = ttk.Entry(row1, textvariable=self.search_var, width=18)
+        search.pack(side="left", padx=(6, 10))
+        # 输入即筛选（本地过滤，无网络请求）
+        self.search_var.trace_add("write", lambda *_: self._apply_filters())
+
+        ttk.Label(row1, text="类型").pack(side="left")
+        self.type_var = tk.StringVar(value="全部")
+        type_box = ttk.Combobox(
+            row1,
+            textvariable=self.type_var,
+            state="readonly",
+            width=12,
+            values=["全部"] + [f"{c} {CourseType.label(c)}" for c in CourseType.ALL],
+        )
+        type_box.pack(side="left", padx=(6, 10))
+        type_box.bind("<<ComboboxSelected>>", lambda _e: self._apply_filters())
+
+        self.query_all_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row1, text="查全部类型", variable=self.query_all_var).pack(
+            side="left", padx=(0, 10)
+        )
+
+        self.query_btn = ttk.Button(row1, text="查询", command=self._on_query_courses)
+        self.query_btn.pack(side="left")
+        self.stop_query_btn = ttk.Button(
+            row1, text="停止查询", command=self._on_stop_query, state="disabled"
+        )
+        self.stop_query_btn.pack(side="left", padx=(6, 0))
+
+        # ---- 第二行：筛选复选框 ----
+        row2 = ttk.Frame(box)
+        row2.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+
+        ttk.Label(row2, text="筛选").pack(side="left")
+        self.filter_available_var = tk.BooleanVar(value=False)
+        self.filter_full_var = tk.BooleanVar(value=False)
+        self.filter_conflict_var = tk.BooleanVar(value=False)
+        self.filter_selected_var = tk.BooleanVar(value=False)
+        for text, var in (
+            ("只看有余量", self.filter_available_var),
+            ("只看已满", self.filter_full_var),
+            ("只看冲突", self.filter_conflict_var),
+            ("只看已选", self.filter_selected_var),
+        ):
+            ttk.Checkbutton(row2, text=text, variable=var, command=self._apply_filters).pack(
+                side="left", padx=(8, 0)
+            )
+
+        ttk.Button(row2, text="清除筛选", command=self._on_clear_filters).pack(
+            side="left", padx=(14, 0)
+        )
+
+        self.count_var = tk.StringVar(value="尚未查询")
+        ttk.Label(row2, textvariable=self.count_var, style="Muted.TLabel").pack(side="right")
+
+        # ---- 表格 ----
+        columns = (
+            "course",
+            "type",
+            "class",
+            "teacher",
+            "place",
+            "capacity",
+            "remaining",
+            "status",
+            "updated",
+        )
         self.cap_tree = ttk.Treeview(box, columns=columns, show="headings", height=8)
-        for key, text, width, anchor in (
-            ("course", "课程", 150, "w"),
-            ("class", "教学班", 90, "center"),
+        specs = (
+            ("course", "课程", 170, "w"),
+            ("type", "类型", 80, "center"),
+            ("class", "教学班", 150, "center"),
             ("teacher", "教师", 80, "w"),
-            ("capacity", "容量", 100, "center"),
+            ("place", "时间地点", 170, "w"),
+            ("capacity", "容量", 90, "center"),
+            ("remaining", "余量", 60, "center"),
             ("status", "状态", 80, "center"),
             ("updated", "更新于", 70, "center"),
-        ):
-            self.cap_tree.heading(key, text=text)
+        )
+        for key, text, width, anchor in specs:
+            # 点列标题排序
+            self.cap_tree.heading(key, text=text, command=lambda k=key: self._on_sort_column(k))
             self.cap_tree.column(key, width=width, anchor=anchor)
-        self.cap_tree.grid(row=0, column=0, sticky="nsew")
+        self.cap_tree.grid(row=2, column=0, sticky="nsew")
 
         scroll = ttk.Scrollbar(box, orient="vertical", command=self.cap_tree.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll.grid(row=2, column=1, sticky="ns")
         self.cap_tree.configure(yscrollcommand=scroll.set)
+        # 横向滚动（列多，窄窗口下需要）
+        hscroll = ttk.Scrollbar(box, orient="horizontal", command=self.cap_tree.xview)
+        hscroll.grid(row=3, column=0, sticky="ew")
+        self.cap_tree.configure(xscrollcommand=hscroll.set)
 
         self.cap_tree.tag_configure("available", foreground=COLORS["success"])
         self.cap_tree.tag_configure("full", foreground=COLORS["muted"])
         self.cap_tree.tag_configure("selected", foreground=COLORS["primary"])
         self.cap_tree.tag_configure("conflict", foreground=COLORS["warning"])
 
+        # 双击某一行把它加进「要盯的课程」
+        self.cap_tree.bind("<Double-1>", self._on_watch_selected_row)
+
+        # 内部数据：每行一个 dict，筛选/排序都基于它
+        self._rows: list[dict] = []
+        self._sort_key: str | None = None
+        self._sort_desc = False
+
     # ---------------- 控制条 ----------------
 
     def _build_control_bar(self) -> None:
         bar = ttk.Frame(self, padding=(14, 4))
-        bar.grid(row=2, column=0, columnspan=2, sticky="ew")
+        bar.grid(row=2, column=0, columnspan=3, sticky="ew")
 
         ttk.Label(bar, text="轮询间隔").pack(side="left")
         self.interval_var = tk.StringVar(value="2.0")
@@ -373,7 +534,7 @@ class BitxkApp(ttk.Frame):
 
     def _build_log_panel(self) -> None:
         box = ttk.LabelFrame(self, text=" 运行日志 ", padding=8)
-        box.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=14, pady=(0, 12))
+        box.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=14, pady=(0, 12))
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
 
@@ -544,14 +705,14 @@ class BitxkApp(ttk.Frame):
             )
             return
         self._set_busy(True, "正在验证…")
-        threading.Thread(target=self._verify_worker, daemon=True).start()
+        cfg = self._snapshot()
+        threading.Thread(target=self._verify_worker, args=(cfg,), daemon=True).start()
 
-    def _verify_worker(self) -> None:
+    def _verify_worker(self, cfg: Config) -> None:
         try:
             from .cli import _build_http
             from .client import XkClient
 
-            cfg = self._current_config()
             http = _build_http(cfg)
             try:
                 http.cookies = dict(self.session.cookies)
@@ -585,14 +746,14 @@ class BitxkApp(ttk.Frame):
         if self._busy:
             return
         self._set_busy(True, "正在自检…")
-        threading.Thread(target=self._selfcheck_worker, daemon=True).start()
+        cfg = self._snapshot()
+        threading.Thread(target=self._selfcheck_worker, args=(cfg,), daemon=True).start()
 
-    def _selfcheck_worker(self) -> None:
+    def _selfcheck_worker(self, cfg: Config) -> None:
         from .auth import API_BASE, CAS_LOGIN_URL
         from .cli import _build_http
 
         try:
-            cfg = self._current_config()
             http = _build_http(cfg)
             try:
                 resp = http.get(f"{API_BASE}/*default/index.do")
@@ -619,8 +780,18 @@ class BitxkApp(ttk.Frame):
 
     # ================================================================ 抢课
 
+    def _snapshot(self) -> Config:
+        """在主线程里把界面状态固化成一份配置快照，交给工作线程用。
+
+        **线程纪律**：tkinter 变量（``StringVar.get()`` 等）只能在主线程读，
+        在工作线程里读会抛 ``RuntimeError: main thread is not in main loop``
+        （实测踩过）。所以所有 ``*_worker`` 都必须接收主线程预先建好的快照，
+        绝不能在worker 里自己读界面。
+        """
+        return self._current_config()
+
     def _current_config(self) -> Config:
-        """按界面上的当前状态生成配置（不落盘）。"""
+        """按界面上的当前状态生成配置（不落盘）。**只允许在主线程调用。**"""
         cfg = self.cfg or Config(base_dir=self.config_path.parent)
         try:
             cfg.poll.interval = float(self.interval_var.get())
@@ -658,7 +829,8 @@ class BitxkApp(ttk.Frame):
         dry_run = self.dry_run_var.get()
         self._stop_flag.clear()
         self._set_busy(True, "运行中…")
-        self.cap_tree.delete(*self.cap_tree.get_children())
+        # 只清掉轮询产生的行，保留查询出来的备选列表
+        self._rows = [r for r in self._rows if not r["key"].startswith("poll:")]
         self.log(
             f"开始轮询 {len(cfg.enabled_courses)} 门课程"
             + ("（试跑模式，不会提交选课）" if dry_run else "（会自动提交选课）"),
@@ -777,6 +949,31 @@ class BitxkApp(ttk.Frame):
             self.login_label.configure(foreground=COLORS["danger"])
             self.log(f"登录态失效：{payload['message']}", "err")
             self._set_busy(False)
+        elif kind == "detail_rows":
+            self._render_detail(payload)
+        elif kind == "detail_failed":
+            self.log(f"「{payload['course']}」查询失败：{payload['message']}", "warn")
+            self.detail_title_var.set(f"{payload['course']}（查询失败）")
+        elif kind == "detail_idle":
+            self._detail_running = False
+            self.detail_refresh_btn.configure(state="normal")
+        elif kind == "query_rows":
+            self._ingest_rows(payload["rows"], payload.get("type", ""))
+        elif kind == "query_done":
+            total = payload.get("total", 0)
+            if payload.get("stopped"):
+                self.log(f"查询已中止，共取到 {total} 条", "warn")
+            else:
+                self.log(f"查询完成，共 {total} 条备选", "ok")
+            self._set_query_idle()
+        elif kind == "query_failed":
+            self.log(f"查询失败：{payload['message']}", "err")
+            self.count_var.set("查询失败")
+            self._set_query_idle()
+        elif kind == "query_idle":
+            self._set_query_idle()
+        elif kind == "batch_code":
+            self._batch_code = payload["code"]
         elif kind == "poller":
             self._render_poller(payload["event"], payload["payload"])
         elif kind == "notify":
@@ -801,10 +998,33 @@ class BitxkApp(ttk.Frame):
             self.login_var.set(f"登录态：{payload.get('name') or ''}（{payload.get('code')}）")
         elif event == "batch":
             self.log(f"当前批次：{payload.get('batch')}", "ok")
+            code = str(payload.get("batch", ""))
+            if code.startswith("[") and "]" in code:
+                self._batch_code = code[1 : code.index("]")]
         elif event == "start":
             self.log(f"开始轮询 {payload.get('courses')} 门课程", "muted")
         elif event == "status":
             self._update_capacity_rows(payload)
+            # 如果轮询的正是中间栏显示的那门课，同步刷新中间栏
+            if payload.get("course") == self._detail_course:
+                self._render_detail(
+                    {
+                        "course": payload["course"],
+                        "rows": [
+                            {
+                                "class": c.get("id", ""),
+                                "teacher": c.get("teacher"),
+                                "capacity": c.get("capacity_total"),
+                                "selected": c.get("selected"),
+                                "remaining": c.get("remaining"),
+                                "status": c.get("status"),
+                                "status_label": c.get("status_label"),
+                                "place": c.get("place", ""),
+                            }
+                            for c in (payload.get("classes") or [])
+                        ],
+                    }
+                )
         elif event == "attempt":
             self.log(f"→ 提交选课：{payload.get('course')} / {payload.get('class_id')}", "info")
         elif event == "dry_run_skip":
@@ -852,46 +1072,437 @@ class BitxkApp(ttk.Frame):
         elif event == "fatal":
             self.log(str(payload.get("message")), "err")
 
-    def _update_capacity_rows(self, payload: dict) -> None:
-        """用最新一轮的查询结果刷新余量表。"""
-        course = payload.get("course", "")
-        rows = payload.get("classes") or []
+    # ================================================================ 中间栏：任务详情
 
-        # 先移除这门课的旧行，再插新行 —— 保证表里永远是最新状态
-        for item in self.cap_tree.get_children():
-            if self.cap_tree.item(item, "values")[0] == course:
-                self.cap_tree.delete(item)
+    def _on_watch_selected(self, _event=None) -> None:
+        """左侧选中一门课 → 拉取它的教学班列表填到中间栏。"""
+        index = self._selected_course_index()
+        if index is None or not self.cfg:
+            return
+        target = self.cfg.courses[index]
+        if target.name == self._detail_course and self.detail_tree.get_children():
+            return  # 已经是这门课且已有数据，不重复请求
+        self._detail_course = target.name
+        self.detail_title_var.set(target.name)
+        self._refresh_detail(target)
 
-        if not rows:
-            self.cap_tree.insert(
-                "",
-                "end",
-                values=(course, "-", "-", "-", "未找到课程", time.strftime("%H:%M:%S")),
-                tags=("full",),
+    def _on_refresh_detail(self) -> None:
+        index = self._selected_course_index()
+        if index is None or not self.cfg:
+            messagebox.showinfo("未选中课程", "请先在左侧选一门课。", parent=self.master)
+            return
+        target = self.cfg.courses[index]
+        self._detail_course = target.name
+        self.detail_title_var.set(target.name)
+        self._refresh_detail(target)
+
+    def _refresh_detail(self, target) -> None:
+        if self.session is None:
+            self.detail_title_var.set(f"{target.name}（未登录）")
+            return
+        if self._detail_running:
+            return
+        self._detail_running = True
+        self.detail_refresh_btn.configure(state="disabled")
+        cfg = self._snapshot()  # 必须在主线程取（tkinter 变量不能跨线程读）
+        threading.Thread(target=self._detail_worker, args=(target, cfg), daemon=True).start()
+
+    def _detail_worker(self, target, cfg: Config) -> None:
+        from .auth import normalize_base_url
+        from .client import XkClient
+        from .http import HttpClient
+
+        http = None
+        try:
+            http = HttpClient(
+                min_interval=max(cfg.poll.min_request_interval, 0.5),
+                timeout=cfg.http.timeout,
+                max_retries=1,
+                verify=cfg.http.verify_ssl,
+                proxy=cfg.http.proxy or None,
             )
+            http.cookies = dict(self.session.cookies)
+            http.set_token(self.session.token)
+            http.student_code = self.session.student_code
+            client = XkClient(http, api_base=normalize_base_url(cfg.api_base))
+
+            batch_code = self._batch_code
+            if not batch_code:
+                batch = client.current_batch(self.session.student_code)
+                batch_code = batch.code
+                self.events.put(_GuiEvent("batch_code", {"code": batch_code}))
+
+            classes = client.find_teaching_classes(
+                target.name,
+                teaching_class_type=target.type,
+                batch_code=batch_code,
+                student_code=self.session.student_code,
+            )
+            rows = [
+                {
+                    "course": target.name,
+                    "class": tc.teaching_class_id,
+                    "teacher": tc.teacher,
+                    "capacity": tc.capacity,
+                    "selected": tc.selected_count,
+                    "remaining": tc.remaining,
+                    "status": tc.status.value,
+                    "status_label": tc.status.label,
+                    "place": tc.time_place,
+                    "matched": target.matches(tc),
+                }
+                for tc in classes
+            ]
+            self.events.put(_GuiEvent("detail_rows", {"course": target.name, "rows": rows}))
+        except BitxkError as exc:
+            logger.warning("查询「%s」的教学班失败：%s", target.name, exc)
+            self.events.put(
+                _GuiEvent("detail_failed", {"course": target.name, "message": str(exc)})
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.exception("查询任务详情异常")
+            self.events.put(
+                _GuiEvent("detail_failed", {"course": target.name, "message": f"意外错误：{exc}"})
+            )
+        finally:
+            if http is not None:
+                http.close()
+            self._detail_running = False
+            self.events.put(_GuiEvent("detail_idle", {}))
+
+    def _render_detail(self, payload: dict) -> None:
+        """把中间栏的查询结果画出来。"""
+        course = payload.get("course", "")
+        rows = payload.get("rows") or []
+        # 用户可能已经切换到别的课，丢弃过期结果
+        if course and course != self._detail_course:
             return
 
+        self.detail_tree.delete(*self.detail_tree.get_children())
         for row in rows:
-            status = row.get("status", CourseStatus.UNKNOWN.value)
             tag = {
                 CourseStatus.AVAILABLE.value: "available",
                 CourseStatus.FULL.value: "full",
                 CourseStatus.SELECTED.value: "selected",
                 CourseStatus.CONFLICT.value: "conflict",
-            }.get(status, "")
-            self.cap_tree.insert(
+            }.get(row.get("status"), "")
+            self.detail_tree.insert(
                 "",
                 "end",
                 values=(
-                    course,
-                    row.get("id", ""),
+                    row.get("class", ""),
                     row.get("teacher") or "-",
-                    row.get("capacity", ""),
+                    "-" if row.get("capacity") is None else row["capacity"],
+                    "-" if row.get("selected") is None else row["selected"],
+                    "-" if row.get("remaining") is None else row["remaining"],
                     row.get("status_label", ""),
-                    time.strftime("%H:%M:%S"),
+                    (row.get("place") or "")[:28],
                 ),
                 tags=(tag,) if tag else (),
             )
+
+        if not rows:
+            self.detail_title_var.set(f"{course}（未找到匹配的教学班）")
+        else:
+            avail = sum(1 for r in rows if r.get("status") == CourseStatus.AVAILABLE.value)
+            tail = (
+                f"  共 {len(rows)} 个班，{avail} 个有余量"
+                if avail
+                else f"  共 {len(rows)} 个班，均已满"
+            )
+            self.detail_title_var.set(f"{course}{tail}")
+
+    # ================================================================ 课程查询
+
+    def _on_query_courses(self) -> None:
+        """查询全部备选课程（后台线程，不阻塞界面）。"""
+        if self.session is None:
+            messagebox.showinfo("还没有登录态", "请先点「用浏览器登录」。", parent=self.master)
+            return
+        if self._query_running:
+            return
+
+        keyword = self.search_var.get().strip()
+        if self.query_all_var.get():
+            types = list(CourseType.ALL)
+        else:
+            types = [self._selected_type() or CourseType.XGXK]
+
+        self._query_running = True
+        self._query_stop.clear()
+        self.query_btn.configure(state="disabled")
+        self.stop_query_btn.configure(state="normal")
+        self.count_var.set("查询中…")
+        self.log(f"开始查询课程：{keyword or '（全部）'} / {len(types)} 种类型", "info")
+        cfg = self._snapshot()  # 同上，主线程取快照
+        threading.Thread(target=self._query_worker, args=(keyword, types, cfg), daemon=True).start()
+
+    def _on_stop_query(self) -> None:
+        self._query_stop.set()
+        self.log("已请求停止查询…", "warn")
+
+    def _selected_type(self) -> str:
+        """把下拉框的显示文本还原成 teachingClassType。"""
+        text = self.type_var.get().strip()
+        if not text or text == "全部":
+            return ""
+        return text.split()[0]
+
+    def _query_worker(self, keyword: str, types: list[str], cfg: Config) -> None:
+        """后台：逐类型查询，把结果推回主线程。"""
+        from .auth import normalize_base_url
+        from .client import XkClient
+        from .http import HttpClient
+
+        http = None
+        try:
+            http = HttpClient(
+                min_interval=max(cfg.poll.min_request_interval, 0.5),
+                timeout=cfg.http.timeout,
+                max_retries=1,
+                verify=cfg.http.verify_ssl,
+                proxy=cfg.http.proxy or None,
+            )
+            http.cookies = dict(self.session.cookies)
+            http.set_token(self.session.token)
+            http.student_code = self.session.student_code
+            client = XkClient(http, api_base=normalize_base_url(cfg.api_base))
+
+            # 批次 / 校区从会话里取，取不到再问接口
+            batch_code = self._batch_code
+            if not batch_code:
+                batch = client.current_batch(self.session.student_code)
+                batch_code = batch.code
+                self.events.put(_GuiEvent("batch_code", {"code": batch_code}))
+
+            total = 0
+            for tc_type in types:
+                if self._query_stop.is_set():
+                    break
+                try:
+                    courses = client.query_courses(
+                        keyword,
+                        teaching_class_type=tc_type,
+                        batch_code=batch_code,
+                        student_code=self.session.student_code,
+                        page_size=100,
+                        check_capacity="2",
+                        check_conflict="0",
+                    )
+                except BitxkError as exc:
+                    self._log_threadsafe(f"  {CourseType.label(tc_type)} 查询失败：{exc}", "warn")
+                    continue
+
+                rows = []
+                for course in courses:
+                    for tc in course.teaching_classes:
+                        rows.append(
+                            {
+                                "course": course.name or tc.course_name,
+                                "type": tc_type,
+                                "class": tc.teaching_class_id,
+                                "teacher": tc.teacher,
+                                "place": tc.time_place,
+                                "capacity": tc.capacity,
+                                "remaining": tc.remaining,
+                                "selected": tc.selected_count,
+                                "status": tc.status.value,
+                                "status_label": tc.status.label,
+                                "capacity_text": tc.capacity_text,
+                                "key": f"{tc_type}:{tc.teaching_class_id}",
+                            }
+                        )
+                total += len(rows)
+                self.events.put(_GuiEvent("query_rows", {"rows": rows, "type": tc_type}))
+
+            self.events.put(
+                _GuiEvent("query_done", {"total": total, "stopped": self._query_stop.is_set()})
+            )
+        except BitxkError as exc:
+            self.events.put(_GuiEvent("query_failed", {"message": str(exc)}))
+        except Exception as exc:  # pragma: no cover
+            logger.exception("课程查询异常")
+            self.events.put(_GuiEvent("query_failed", {"message": f"意外错误：{exc}"}))
+        finally:
+            if http is not None:
+                http.close()
+            self._query_running = False
+            self.events.put(_GuiEvent("query_idle", {}))
+
+    def _ingest_rows(self, rows: list[dict], tc_type: str = "") -> None:
+        """把一批查询结果并入表格模型（同 key 覆盖，保留其它类型的结果）。"""
+        index = {r["key"]: r for r in self._rows}
+        for row in rows:
+            index[row["key"]] = row
+        self._rows = list(index.values())
+        self._apply_filters()
+
+    # ================================================================ 筛选与排序
+
+    def _on_clear_filters(self) -> None:
+        self.search_var.set("")
+        self.type_var.set("全部")
+        self.filter_available_var.set(False)
+        self.filter_full_var.set(False)
+        self.filter_conflict_var.set(False)
+        self.filter_selected_var.set(False)
+        self._sort_key = None
+        self._sort_desc = False
+        self._apply_filters()
+
+    def _on_sort_column(self, key: str) -> None:
+        """点列标题：同列再点一次切换升降序。"""
+        if self._sort_key == key:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_key, self._sort_desc = key, False
+        self._apply_filters()
+
+    def _apply_filters(self) -> None:
+        """按关键词 + 类型 + 勾选项过滤，然后重画表格（纯本地，无请求）。"""
+        if not hasattr(self, "_rows"):
+            return
+
+        keyword = self.search_var.get().strip().lower()
+        type_filter = self._selected_type()
+        want_available = self.filter_available_var.get()
+        want_full = self.filter_full_var.get()
+        want_conflict = self.filter_conflict_var.get()
+        want_selected = self.filter_selected_var.get()
+        any_status_filter = want_available or want_full or want_conflict or want_selected
+
+        rows = []
+        for row in self._rows:
+            if (
+                keyword
+                and keyword not in row["course"].lower()
+                and keyword not in (row.get("teacher") or "").lower()
+                and keyword not in row["class"].lower()
+            ):
+                continue
+            if type_filter and row["type"] != type_filter:
+                continue
+            if any_status_filter:
+                ok = (
+                    (want_available and row["status"] == CourseStatus.AVAILABLE.value)
+                    or (want_full and row["status"] == CourseStatus.FULL.value)
+                    or (want_conflict and row["status"] == CourseStatus.CONFLICT.value)
+                    or (want_selected and row["status"] == CourseStatus.SELECTED.value)
+                )
+                if not ok:
+                    continue
+            rows.append(row)
+
+        # 排序
+        if self._sort_key:
+            key = self._sort_key
+            if key == "remaining":
+                rows.sort(
+                    key=lambda r: (r["remaining"] is None, r["remaining"]), reverse=self._sort_desc
+                )
+            elif key == "capacity":
+                rows.sort(
+                    key=lambda r: (r["capacity"] is None, r["capacity"]), reverse=self._sort_desc
+                )
+            else:
+                rows.sort(key=lambda r: str(r.get(key) or ""), reverse=self._sort_desc)
+        else:
+            # 默认：有余量的排前面，再按课程名
+            rows.sort(key=lambda r: (r["status"] != CourseStatus.AVAILABLE.value, r["course"]))
+
+        self._render_rows(rows)
+
+    def _render_rows(self, rows: list[dict]) -> None:
+        self.cap_tree.delete(*self.cap_tree.get_children())
+        stamp = time.strftime("%H:%M:%S")
+        for row in rows:
+            tag = {
+                CourseStatus.AVAILABLE.value: "available",
+                CourseStatus.FULL.value: "full",
+                CourseStatus.SELECTED.value: "selected",
+                CourseStatus.CONFLICT.value: "conflict",
+            }.get(row["status"], "")
+            self.cap_tree.insert(
+                "",
+                "end",
+                iid=row["key"],
+                values=(
+                    row["course"],
+                    CourseType.label(row["type"]),
+                    row["class"],
+                    row.get("teacher") or "-",
+                    (row.get("place") or "")[:30],
+                    row.get("capacity_text") or "-",
+                    "-" if row.get("remaining") is None else row["remaining"],
+                    row["status_label"],
+                    stamp,
+                ),
+                tags=(tag,) if tag else (),
+            )
+        total, shown = len(self._rows), len(rows)
+        if total == 0:
+            self.count_var.set("尚未查询")
+        else:
+            self.count_var.set(f"显示 {shown} / 共 {total} 条")
+
+    # ================================================================ 轮询结果并入
+
+    def _on_watch_selected_row(self, _event=None) -> None:
+        """双击表格里的一行，把该课程加进「要盯的课程」。"""
+        selection = self.cap_tree.selection()
+        if not selection or not self.cfg:
+            return
+        row = next((r for r in self._rows if r["key"] == selection[0]), None)
+        if not row:
+            return
+        name = row["course"]
+        if any(t.name == name for t in self.cfg.courses):
+            self.log(f"「{name}」已经在要盯的列表里了", "muted")
+            return
+        try:
+            target = WatchTarget(name=name, type=row["type"], priority=100)
+        except ConfigError as exc:
+            self.log(f"无法添加：{exc}", "err")
+            return
+        self.cfg.courses.append(target)
+        self._refresh_course_tree()
+        self.log(f"已加入要盯的课程：{name}（{CourseType.label(row['type'])}）", "ok")
+
+    def _update_capacity_rows(self, payload: dict) -> None:
+        """轮询时把最新状态并入同一张表（按教学班 ID 覆盖）。"""
+        course = payload.get("course", "")
+        classes = payload.get("classes") or []
+        # 注意：轮询事件里没有课程类型，按教学班 ID 匹配已有行；
+        # 匹配不到就当作新行加入（类型留空）。
+        by_class = {r["class"]: r for r in self._rows}
+        for item in classes:
+            tc_id = str(item.get("id", ""))
+            existing = by_class.get(tc_id)
+            key = existing["key"] if existing else f"poll:{tc_id}"
+            row = existing or {
+                "course": course,
+                "type": "",
+                "class": tc_id,
+                "key": key,
+            }
+            row.update(
+                {
+                    "teacher": item.get("teacher") or row.get("teacher", ""),
+                    "status": item.get("status", CourseStatus.UNKNOWN.value),
+                    "status_label": item.get("status_label", ""),
+                    "capacity_text": item.get("capacity", ""),
+                    "remaining": item.get("remaining"),
+                }
+            )
+            by_class[tc_id] = row
+
+        if classes:
+            # 用 by_class 的值重建（已在表里的其它课程保留）
+            merged = {r["key"]: r for r in self._rows}
+            for row in by_class.values():
+                merged[row["key"]] = row
+            self._rows = list(merged.values())
+        self._apply_filters()
 
     def _notify_success(self, course: str) -> None:
         from .notify import Notify
@@ -916,6 +1527,11 @@ class BitxkApp(ttk.Frame):
         else:
             self.stop_btn.configure(state="disabled")
             self.poller = None
+
+    def _set_query_idle(self) -> None:
+        self._query_running = False
+        self.query_btn.configure(state="normal")
+        self.stop_query_btn.configure(state="disabled")
 
     def _on_close(self) -> None:
         if self._busy and not messagebox.askyesno(

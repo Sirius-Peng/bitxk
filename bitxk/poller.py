@@ -386,10 +386,14 @@ class Poller:
                 {
                     "id": tc.teaching_class_id,
                     "teacher": tc.teacher,
+                    # 显示文本 + 原始数字都给出来，界面就不必去反解字符串
                     "capacity": tc.capacity_text,
+                    "capacity_total": tc.capacity,
+                    "selected": tc.selected_count,
                     "remaining": tc.remaining,
                     "status": tc.status.value,
                     "status_label": tc.status.label,
+                    "place": tc.time_place,
                 }
                 for tc in filtered
             ],

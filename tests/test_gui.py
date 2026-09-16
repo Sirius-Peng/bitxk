@@ -113,106 +113,457 @@ class TestCourseManagement:
 # --------------------------------------------------------------------------
 
 
-class TestCapacityRendering:
-    def test_有余量的课用绿色标签(self, app):
-        app._render_poller(
+class TestCourseTable:
+    """课程查询表格：渲染、合并、筛选、排序（全部本地逻辑，无网络）。"""
+
+    def _rows(self, app, rows):
+        app._ingest_rows(rows)
+
+    @staticmethod
+    def _row(
+        key,
+        course="课",
+        tc_type="XGXK",
+        tc_class="1001",
+        teacher="张",
+        capacity=40,
+        remaining=5,
+        status="available",
+        place="周一 1-2 节",
+    ):
+        return {
+            "course": course,
+            "type": tc_type,
+            "class": tc_class,
+            "teacher": teacher,
+            "place": place,
+            "capacity": capacity,
+            "remaining": remaining,
+            "selected": (capacity - remaining)
+            if (capacity is not None and remaining is not None)
+            else None,
+            "status": status,
+            "status_label": {
+                "available": "有余量",
+                "full": "已满",
+                "conflict": "冲突",
+                "selected": "已选",
+            }.get(status, status),
+            "capacity_text": f"{capacity - (remaining or 0)}/{capacity} (余 {remaining})",
+            "key": key,
+        }
+
+    # ---------------- 渲染 ----------------
+
+    def test_渲染到表格(self, app):
+        self._rows(app, [self._row("XGXK:1", course="科幻文学")])
+        items = app.cap_tree.get_children()
+        assert len(items) == 1
+        values = app.cap_tree.item(items[0], "values")
+        assert values[0] == "科幻文学"
+        assert values[1] == CourseType.label("XGXK")  # 类型列
+        assert values[2] == "1001"  # 教学班列
+        assert values[7] == "有余量"  # 状态列
+
+    def test_表格包含所有要求的列(self, app):
+        cols = app.cap_tree["columns"]
+        for need in (
+            "course",
+            "type",
+            "class",
+            "teacher",
+            "place",
+            "capacity",
+            "remaining",
             "status",
+        ):
+            assert need in cols, f"缺少列 {need}"
+
+    def test_有余量用绿色标签(self, app):
+        self._rows(app, [self._row("k1", status="available")])
+        item = app.cap_tree.get_children()[0]
+        assert app.cap_tree.item(item, "tags") == ("available",)
+
+    def test_已满用灰色标签(self, app):
+        self._rows(app, [self._row("k1", status="full", remaining=0)])
+        item = app.cap_tree.get_children()[0]
+        assert app.cap_tree.item(item, "tags") == ("full",)
+
+    def test_冲突用黄色标签(self, app):
+        self._rows(app, [self._row("k1", status="conflict")])
+        item = app.cap_tree.get_children()[0]
+        assert app.cap_tree.item(item, "tags") == ("conflict",)
+
+    def test_同一教学班重复查询只保留一行(self, app):
+        for remaining in (5, 4, 3):
+            self._rows(app, [self._row("XGXK:1001", remaining=remaining)])
+        items = app.cap_tree.get_children()
+        assert len(items) == 1, "同一教学班不该累加出多行"
+        assert app.cap_tree.item(items[0], "values")[6] == "3"
+
+    def test_不同教学班各自成行(self, app):
+        self._rows(
+            app,
+            [
+                self._row("XGXK:1", tc_class="1"),
+                self._row("XGXK:2", tc_class="2"),
+            ],
+        )
+        assert len(app.cap_tree.get_children()) == 2
+
+    def test_计数显示(self, app):
+        self._rows(app, [self._row(f"k{i}") for i in range(3)])
+        assert "3" in app.count_var.get()
+
+    # ---------------- 筛选 ----------------
+
+    def test_只看有余量(self, app):
+        self._rows(
+            app,
+            [
+                self._row("a", course="有余量的", status="available"),
+                self._row("b", course="满的", status="full", remaining=0),
+            ],
+        )
+        app.filter_available_var.set(True)
+        app._apply_filters()
+        names = [app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children()]
+        assert names == ["有余量的"]
+
+    def test_只看已满(self, app):
+        self._rows(
+            app,
+            [
+                self._row("a", course="有余量的", status="available"),
+                self._row("b", course="满的", status="full", remaining=0),
+            ],
+        )
+        app.filter_full_var.set(True)
+        app._apply_filters()
+        names = [app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children()]
+        assert names == ["满的"]
+
+    def test_只看冲突(self, app):
+        self._rows(
+            app,
+            [
+                self._row("a", course="正常的", status="available"),
+                self._row("b", course="冲突的", status="conflict"),
+            ],
+        )
+        app.filter_conflict_var.set(True)
+        app._apply_filters()
+        names = [app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children()]
+        assert names == ["冲突的"]
+
+    def test_多个筛选是或的关系(self, app):
+        self._rows(
+            app,
+            [
+                self._row("a", course="A", status="available"),
+                self._row("b", course="B", status="full", remaining=0),
+                self._row("c", course="C", status="conflict"),
+            ],
+        )
+        app.filter_available_var.set(True)
+        app.filter_conflict_var.set(True)
+        app._apply_filters()
+        names = sorted(app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children())
+        assert names == ["A", "C"]
+
+    def test_清除筛选恢复全部(self, app):
+        self._rows(app, [self._row("a"), self._row("b")])
+        app.filter_full_var.set(True)
+        app._apply_filters()
+        app._on_clear_filters()
+        assert len(app.cap_tree.get_children()) == 2
+
+    # ---------------- 搜索与类型筛选 ----------------
+
+    def test_按课程名搜索(self, app):
+        self._rows(
+            app,
+            [
+                self._row("a", course="科幻文学"),
+                self._row("b", course="经济学原理"),
+            ],
+        )
+        app.search_var.set("科幻")
+        assert [app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children()] == [
+            "科幻文学"
+        ]
+
+    def test_按教师搜索(self, app):
+        self._rows(
+            app,
+            [
+                self._row("a", course="A", teacher="张三"),
+                self._row("b", course="B", teacher="李四"),
+            ],
+        )
+        app.search_var.set("李四")
+        assert [app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children()] == ["B"]
+
+    def test_按教学班号搜索(self, app):
+        self._rows(
+            app,
+            [
+                self._row("a", tc_class="202620271AECG003501"),
+                self._row("b", tc_class="9999"),
+            ],
+        )
+        app.search_var.set("003501")
+        assert len(app.cap_tree.get_children()) == 1
+
+    def test_按课程类型筛选(self, app):
+        self._rows(
+            app,
+            [
+                self._row("a", course="公选", tc_type="XGXK"),
+                self._row("b", course="体育", tc_type="TYKC"),
+            ],
+        )
+        app.type_var.set("TYKC 体育课程")
+        app._apply_filters()
+        assert [app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children()] == ["体育"]
+
+    def test_搜索是本地过滤不触发请求(self, app):
+        """输入即筛选，绝不能每敲一个字就发一次请求。"""
+        self._rows(app, [self._row("a", course="科幻文学")])
+        before = list(app._rows)
+        app.search_var.set("幻")
+        assert app._rows == before, "搜索不该改动数据源"
+
+    # ---------------- 排序 ----------------
+
+    def test_按余量排序(self, app):
+        self._rows(
+            app,
+            [
+                self._row("a", course="少", remaining=1),
+                self._row("b", course="多", remaining=30),
+            ],
+        )
+        app._on_sort_column("remaining")
+        got = [app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children()]
+        assert got == ["少", "多"]
+        app._on_sort_column("remaining")  # 再点一次降序
+        got = [app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children()]
+        assert got == ["多", "少"]
+
+    def test_按课程名排序(self, app):
+        self._rows(app, [self._row("a", course="B"), self._row("b", course="A")])
+        app._on_sort_column("course")
+        got = [app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children()]
+        assert got == ["A", "B"]
+
+    def test_默认把有余量的排前面(self, app):
+        self._rows(
+            app,
+            [
+                self._row("a", course="满的", status="full", remaining=0),
+                self._row("b", course="有余量", status="available", remaining=2),
+            ],
+        )
+        got = [app.cap_tree.item(i, "values")[0] for i in app.cap_tree.get_children()]
+        assert got[0] == "有余量", f"默认排序应把有余量的放前面：{got}"
+
+    # ---------------- 加入要盯的课程 ----------------
+
+    def test_双击行加入要盯的课程(self, app):
+        self._rows(app, [self._row("XGXK:1001", course="科幻文学", tc_type="XGXK")])
+        item = app.cap_tree.get_children()[0]
+        app.cap_tree.selection_set(item)
+        app._on_watch_selected_row()
+        assert [t.name for t in app.cfg.courses] == ["科幻文学"]
+        assert app.cfg.courses[0].type == "XGXK"
+
+    def test_重复加入会被忽略(self, app):
+        from bitxk.config import WatchTarget
+
+        app.cfg.courses.append(WatchTarget(name="科幻文学"))
+        self._rows(app, [self._row("XGXK:1001", course="科幻文学")])
+        app.cap_tree.selection_set(app.cap_tree.get_children()[0])
+        app._on_watch_selected_row()
+        assert len(app.cfg.courses) == 1
+
+    # ---------------- 轮询结果并入 ----------------
+
+    def test_轮询结果并入已有行(self, app):
+        self._rows(app, [self._row("XGXK:1001", tc_class="1001", remaining=5)])
+        app._update_capacity_rows(
             {
                 "course": "科幻文学",
                 "classes": [
                     {
                         "id": "1001",
-                        "teacher": "张三",
-                        "capacity": "12/40 (余 28)",
+                        "teacher": "张",
+                        "capacity": "12/40 (余 3)",
+                        "remaining": 3,
                         "status": "available",
                         "status_label": "有余量",
                     }
                 ],
-            },
+            }
         )
-        item = app.cap_tree.get_children()[0]
-        assert app.cap_tree.item(item, "tags") == ("available",)
-        assert app.cap_tree.item(item, "values")[4] == "有余量"
+        items = app.cap_tree.get_children()
+        assert len(items) == 1, "轮询更新同一教学班不该新增行"
+        assert str(app.cap_tree.item(items[0], "values")[6]) == "3"
 
-    def test_已满的课用灰色标签(self, app):
+    def test_轮询新教学班会被追加(self, app):
+        app._update_capacity_rows(
+            {
+                "course": "新课",
+                "classes": [
+                    {
+                        "id": "9999",
+                        "capacity": "1/10 (余 9)",
+                        "remaining": 9,
+                        "status": "available",
+                        "status_label": "有余量",
+                    }
+                ],
+            }
+        )
+        assert len(app.cap_tree.get_children()) == 1
+
+
+class TestWatchDetailPanel:
+    """中间栏：所选任务的备选教学班（容量 / 已选 / 余量）。"""
+
+    @staticmethod
+    def _payload(course="金融学概论", rows=None):
+        return {
+            "course": course,
+            "rows": rows
+            if rows is not None
+            else [
+                {
+                    "class": "1001",
+                    "teacher": "马明",
+                    "capacity": 120,
+                    "selected": 121,
+                    "remaining": 0,
+                    "status": "full",
+                    "status_label": "已满",
+                    "place": "周三 3-4 节",
+                },
+                {
+                    "class": "1002",
+                    "teacher": "李四",
+                    "capacity": 60,
+                    "selected": 40,
+                    "remaining": 20,
+                    "status": "available",
+                    "status_label": "有余量",
+                    "place": "周五 1-2 节",
+                },
+            ],
+        }
+
+    def test_中间栏列齐全(self, app):
+        for need in ("class", "teacher", "capacity", "selected", "remaining", "status"):
+            assert need in app.detail_tree["columns"], f"缺少列 {need}"
+
+    def test_渲染教学班与人数(self, app):
+        app._detail_course = "金融学概论"
+        app._render_detail(self._payload())
+        items = app.detail_tree.get_children()
+        assert len(items) == 2
+        v = app.detail_tree.item(items[0], "values")
+        assert v[0] == "1001"
+        assert v[2] == "120"  # 容量
+        assert v[3] == "121"  # 已选
+        assert v[4] == "0"  # 余量
+
+    def test_标题汇总有余量班数(self, app):
+        app._detail_course = "金融学概论"
+        app._render_detail(self._payload())
+        assert "2 个班" in app.detail_title_var.get()
+        assert "1 个有余量" in app.detail_title_var.get()
+
+    def test_全部已满时标题说明(self, app):
+        app._detail_course = "课"
+        app._render_detail(
+            {
+                "course": "课",
+                "rows": [
+                    {
+                        "class": "1",
+                        "capacity": 10,
+                        "selected": 10,
+                        "remaining": 0,
+                        "status": "full",
+                        "status_label": "已满",
+                    },
+                ],
+            }
+        )
+        assert "均已满" in app.detail_title_var.get()
+
+    def test_未找到教学班时标题说明(self, app):
+        app._detail_course = "查无此课"
+        app._render_detail({"course": "查无此课", "rows": []})
+        assert "未找到" in app.detail_title_var.get()
+
+    def test_丢弃过期结果(self, app):
+        """用户已切到别的课，旧结果不该覆盖中间栏。"""
+        app._detail_course = "新课"
+        app._render_detail(self._payload(course="旧课"))
+        assert len(app.detail_tree.get_children()) == 0
+
+    def test_已满用灰色标签(self, app):
+        app._detail_course = "课"
+        app._render_detail(
+            {
+                "course": "课",
+                "rows": [
+                    {"class": "1", "status": "full", "status_label": "已满"},
+                ],
+            }
+        )
+        item = app.detail_tree.get_children()[0]
+        assert app.detail_tree.item(item, "tags") == ("full",)
+
+    def test_轮询事件同步刷新中间栏(self, app):
+        """轮询的正是中间栏那门课时应同步更新，保持数据新鲜。"""
+        app._detail_course = "金融学概论"
+        app._render_detail(self._payload())
         app._render_poller(
             "status",
             {
-                "course": "体育/羽毛球",
+                "course": "金融学概论",
                 "classes": [
                     {
-                        "id": "2001",
-                        "teacher": "王五",
-                        "capacity": "30/30 (余 0)",
+                        "id": "1001",
+                        "teacher": "马明",
+                        "capacity": "121/120 (余 0)",
+                        "capacity_total": 120,
+                        "selected": 121,
+                        "remaining": 0,
                         "status": "full",
                         "status_label": "已满",
+                        "place": "周三",
                     }
                 ],
             },
         )
-        item = app.cap_tree.get_children()[0]
-        assert app.cap_tree.item(item, "tags") == ("full",)
+        items = app.detail_tree.get_children()
+        assert len(items) == 1
+        assert app.detail_tree.item(items[0], "values")[3] == "121"
 
-    def test_冲突用黄色标签(self, app):
+    def test_轮询别的课不动中间栏(self, app):
+        app._detail_course = "金融学概论"
+        app._render_detail(self._payload())
+        before = len(app.detail_tree.get_children())
         app._render_poller(
             "status",
             {
-                "course": "课",
-                "classes": [{"id": "1", "status": "conflict", "status_label": "冲突"}],
+                "course": "另一门课",
+                "classes": [{"id": "9999", "status": "full", "status_label": "已满"}],
             },
         )
-        item = app.cap_tree.get_children()[0]
-        assert app.cap_tree.item(item, "tags") == ("conflict",)
-
-    def test_查不到课程时也显示一行(self, app):
-        app._render_poller("status", {"course": "不存在的课", "classes": []})
-        assert len(app.cap_tree.get_children()) == 1
-        assert "未找到" in app.cap_tree.item(app.cap_tree.get_children()[0], "values")[4]
-
-    def test_同一门课刷新时替换旧行而不是累加(self, app):
-        """轮询会反复推送同一门课的状态，表格必须保持每门课最新一行。"""
-        for capacity in ("余 5", "余 4", "余 3"):
-            app._render_poller(
-                "status",
-                {
-                    "course": "课",
-                    "classes": [
-                        {
-                            "id": "1",
-                            "capacity": capacity,
-                            "status": "available",
-                            "status_label": "有余量",
-                        }
-                    ],
-                },
-            )
-        rows = app.cap_tree.get_children()
-        assert len(rows) == 1
-        assert app.cap_tree.item(rows[0], "values")[3] == "余 3"
-
-    def test_多门课各自独立成行(self, app):
-        for course in ("A", "B"):
-            app._render_poller(
-                "status",
-                {
-                    "course": course,
-                    "classes": [{"id": "1", "status": "full", "status_label": "已满"}],
-                },
-            )
-        assert len(app.cap_tree.get_children()) == 2
-
-    def test_多个教学班各占一行(self, app):
-        app._render_poller(
-            "status",
-            {
-                "course": "课",
-                "classes": [
-                    {"id": "1", "status": "available", "status_label": "有余量"},
-                    {"id": "2", "status": "full", "status_label": "已满"},
-                ],
-            },
-        )
-        assert len(app.cap_tree.get_children()) == 2
+        assert len(app.detail_tree.get_children()) == before
 
 
 # --------------------------------------------------------------------------
