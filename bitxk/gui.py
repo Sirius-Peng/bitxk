@@ -69,9 +69,12 @@ __all__ = ["run_gui"]
 #:   右栏  课程 / 容量 / 余量 / 状态
 # 每个数字 = 表格列宽合计 + 滚动条(~16) + 面板内边距(~40)，
 # 这样分配出来的宽度能让对应表格**不需要横向滚动**。
-COURSE_TREE_MIN_W = 312  # 左：263(列) + 16(滚动条) + 32(内边距)
-DETAIL_TREE_MIN_W = 536  # 中：488 + 48
-BROWSE_TREE_MIN_W = 852  # 右：804 + 48
+# 精简为「课程/老师/时间/剩余」四列后，三栏总需求从 ~1675px 降到 ~1350px，
+# 1512px 的屏幕能轻松放下，窗口也不必再顶着屏幕边缘。
+# 数值 = 列宽合计 + 竖向滚动条(16) + 面板内边距(32)。
+COURSE_TREE_MIN_W = 238  # 左：190 列
+DETAIL_TREE_MIN_W = 508  # 中：460 列
+BROWSE_TREE_MIN_W = 618  # 右：570 列
 
 #: 三栏宽度合计 + 栏间距与窗口左右留白（6+6+14+14 ≈ 40，留 48 余量）
 LAYOUT_MIN_W = COURSE_TREE_MIN_W + DETAIL_TREE_MIN_W + BROWSE_TREE_MIN_W + 48
@@ -323,15 +326,13 @@ class BitxkApp(ttk.Frame):
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
 
-        columns = ("name", "type", "priority")
+        # 只留课程名：类型与优先级是配置细节，在列表里占位不划算。
+        # 双击某行仍可编辑这两项。被禁用的课用灰色标出来。
+        columns = ("name",)
         self.course_tree = ttk.Treeview(box, columns=columns, show="headings", height=8)
         self.course_tree.heading("name", text="课程名")
-        self.course_tree.heading("type", text="类型")
-        self.course_tree.heading("priority", text="优先级")
-        # 列宽合计要 ≤ 表格可用宽度（容器 - 内边距），否则需要横向滚动
-        self.course_tree.column("name", width=125)
-        self.course_tree.column("type", width=88, anchor="center")
-        self.course_tree.column("priority", width=50, anchor="center")
+        self.course_tree.column("name", width=190)
+        self.course_tree.tag_configure("disabled", foreground=COLORS["muted"])
         self.course_tree.grid(row=0, column=0, sticky="nsew")
         self.course_tree.bind("<Double-1>", lambda _e: self._on_edit_course())
         # 选中一门课 → 中间栏显示它的备选教学班
@@ -369,18 +370,14 @@ class BitxkApp(ttk.Frame):
         self.detail_refresh_btn = ttk.Button(head, text="刷新", command=self._on_refresh_detail)
         self.detail_refresh_btn.pack(side="right")
 
-        # 顺序必须与下面的 specs 一致 —— Treeview 只认这个元组的顺序，
-        # 光改 specs 是没用的（踩过：列序不生效，关键列还排在后面）。
-        columns = ("class", "capacity", "selected", "remaining", "status", "teacher", "place")
+        # 与右栏保持一致的极简四列；中栏多一个教学班号用于区分同名的班
+        columns = ("class", "teacher", "time", "remaining")
         self.detail_tree = ttk.Treeview(box, columns=columns, show="headings", height=8)
         specs = (
-            ("class", "教学班", 108, "center"),
-            ("capacity", "容量", 50, "center"),
-            ("selected", "已选", 50, "center"),
-            ("remaining", "余量", 50, "center"),
-            ("status", "状态", 60, "w"),
-            ("teacher", "教师", 50, "w"),
-            ("place", "时间地点", 120, "w"),
+            ("class", "教学班", 150, "center"),
+            ("teacher", "老师", 90, "w"),
+            ("time", "上课时间", 150, "w"),
+            ("remaining", "剩余", 70, "center"),
         )
         for key, text, width, anchor_x in specs:
             self.detail_tree.heading(key, text=text)
@@ -482,29 +479,16 @@ class BitxkApp(ttk.Frame):
         ttk.Label(row2, textvariable=self.count_var, style="Muted.TLabel").pack(side="right")
 
         # ---- 表格 ----
-        # 顺序与 specs 保持一致（关键列靠前，窄屏也能先看到）
-        columns = (
-            "course",
-            "capacity",
-            "remaining",
-            "status",
-            "teacher",
-            "type",
-            "class",
-            "place",
-            "updated",
-        )
+        # 只保留用户真正要看的四列：课程 / 教师 / 时间 / 余量。
+        # 其余（类型、教学班号、容量分母、已选、更新时间）在界面上没必要，
+        # 需要细节时可看命令行输出或双击加入任务后看中栏。
+        columns = ("course", "teacher", "time", "remaining")
         self.cap_tree = ttk.Treeview(box, columns=columns, show="headings", height=8)
         specs = (
-            ("course", "课程", 170, "w"),
-            ("capacity", "容量", 76, "center"),
-            ("remaining", "余量", 50, "center"),
-            ("status", "状态", 62, "center"),
-            ("teacher", "教师", 60, "w"),
-            ("type", "类型", 66, "center"),
-            ("class", "教学班", 120, "center"),
-            ("place", "时间地点", 140, "w"),
-            ("updated", "更新于", 60, "center"),
+            ("course", "课程", 260, "w"),
+            ("teacher", "老师", 90, "w"),
+            ("time", "上课时间", 150, "w"),
+            ("remaining", "剩余", 70, "center"),
         )
         for key, text, width, anchor in specs:
             # 点列标题排序
@@ -634,11 +618,8 @@ class BitxkApp(ttk.Frame):
             self.course_tree.insert(
                 "",
                 "end",
-                values=(
-                    _fit(target.name + label, 125),
-                    _fit(CourseType.short_label(target.type), 88),
-                    target.priority,
-                ),
+                values=(_fit(target.name + label, 190),),
+                tags=() if target.enabled else ("disabled",),
             )
 
     def _selected_course_index(self) -> int | None:
@@ -1055,6 +1036,7 @@ class BitxkApp(ttk.Frame):
                                 "status": c.get("status"),
                                 "status_label": c.get("status_label"),
                                 "place": c.get("place", ""),
+                                "time": c.get("time", ""),
                             }
                             for c in (payload.get("classes") or [])
                         ],
@@ -1184,6 +1166,7 @@ class BitxkApp(ttk.Frame):
                     "status": tc.status.value,
                     "status_label": tc.status.label,
                     "place": tc.time_place,
+                    "time": tc.time_short,
                     "matched": target.matches(tc),
                 }
                 for tc in classes
@@ -1225,13 +1208,10 @@ class BitxkApp(ttk.Frame):
                 "",
                 "end",
                 values=(
-                    _fit(row.get("class", ""), 108),
-                    "-" if row.get("capacity") is None else row["capacity"],
-                    "-" if row.get("selected") is None else row["selected"],
+                    _fit(row.get("class", ""), 150),
+                    _fit(row.get("teacher") or "-", 90),
+                    _fit(row.get("time") or row.get("place") or "-", 150),
                     "-" if row.get("remaining") is None else row["remaining"],
-                    _fit(row.get("status_label", ""), 60),
-                    _fit(row.get("teacher") or "-", 50),
-                    _fit(row.get("place") or "", 120),
                 ),
                 tags=(tag,) if tag else (),
             )
@@ -1338,6 +1318,7 @@ class BitxkApp(ttk.Frame):
                                 "class": tc.teaching_class_id,
                                 "teacher": tc.teacher,
                                 "place": tc.time_place,
+                                "time": tc.time_short,
                                 "capacity": tc.capacity,
                                 "remaining": tc.remaining,
                                 "selected": tc.selected_count,
@@ -1452,7 +1433,6 @@ class BitxkApp(ttk.Frame):
 
     def _render_rows(self, rows: list[dict]) -> None:
         self.cap_tree.delete(*self.cap_tree.get_children())
-        stamp = time.strftime("%H:%M:%S")
         for row in rows:
             tag = {
                 CourseStatus.AVAILABLE.value: "available",
@@ -1465,15 +1445,10 @@ class BitxkApp(ttk.Frame):
                 "end",
                 iid=row["key"],
                 values=(
-                    _fit(row["course"], 170),
-                    _fit(row.get("capacity_text") or "-", 76),
+                    _fit(row["course"], 260),
+                    _fit(row.get("teacher") or "-", 90),
+                    _fit(row.get("time") or "-", 150),
                     "-" if row.get("remaining") is None else row["remaining"],
-                    _fit(row["status_label"], 62),
-                    _fit(row.get("teacher") or "-", 60),
-                    _fit(CourseType.short_label(row["type"]), 66),
-                    _fit(row["class"], 120),
-                    _fit(row.get("place") or "", 140),
-                    stamp,
                 ),
                 tags=(tag,) if tag else (),
             )

@@ -394,6 +394,7 @@ class Poller:
                     "status": tc.status.value,
                     "status_label": tc.status.label,
                     "place": tc.time_place,
+                    "time": tc.time_short,
                 }
                 for tc in filtered
             ],

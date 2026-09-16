@@ -152,8 +152,20 @@ class TeachingClass:
                 _pick(data, "teacherName", "teachers", "skjsxm", "teacher", default="") or ""
             ),
             campus=str(_pick(data, "campusName", "campus", "xqmc", default="") or ""),
+            # 字段名以真实响应为准：dataList 里是 teachingPlace
+            # （形如「1-16周 星期五 1-2节 文萃楼I303」）。其余几个是
+            # 历史版本与其它接口的写法，一并兼容。
             time_place=str(
-                _pick(data, "timePlace", "sksjdd", "classTimePlace", "arrangeInfo", default="")
+                _pick(
+                    data,
+                    "teachingPlace",
+                    "timePlace",
+                    "sksjdd",
+                    "classTimePlace",
+                    "arrangeInfo",
+                    "teachingPlaceName",
+                    default="",
+                )
                 or ""
             ),
             credits=str(_pick(data, "credits", "xf", default="") or ""),
@@ -290,6 +302,29 @@ class TeachingClass:
     def is_selectable(self) -> bool:
         """是否处于「可以尝试提交选课」的状态。"""
         return self.status is CourseStatus.AVAILABLE
+
+    #: 紧凑时间写法里要保留的部分：周几 + 第几节。
+    #: 原串形如「1-16周 星期五 1-2节 文萃楼I303」（实测 188px），
+    #: 表格列宽紧张，只留用户真正看重的"周几第几节"（约 90px）。
+    _DAY_RE = re.compile(r"(星期[一二三四五六日天]|周[一二三四五六日天])")
+    _PERIOD_RE = re.compile(r"(\d{1,2}-\d{1,2}节|\d{1,2}节)")
+
+    @property
+    def time_short(self) -> str:
+        """把时间地点压成「周几 第几节」。
+
+        用户看课表最关心的是"周几第几节"；上课周次（1-16周）与具体教室
+        在列宽有限时属于可以牺牲的信息 —— 需要细节时可看完整字段。
+        识别不了就原样返回，绝不丢信息。
+        """
+        raw = (self.time_place or "").strip()
+        if not raw:
+            return ""
+        day = self._DAY_RE.search(raw)
+        period = self._PERIOD_RE.search(raw)
+        if day and period:
+            return f"{day.group(1)} {period.group(1)}"
+        return raw
 
     @property
     def capacity_compact(self) -> str:

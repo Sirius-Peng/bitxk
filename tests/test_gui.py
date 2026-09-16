@@ -80,7 +80,6 @@ class TestCourseManagement:
         assert len(app.course_tree.get_children()) == 1
         values = app.course_tree.item(app.course_tree.get_children()[0], "values")
         assert values[0] == "测试课"
-        assert values[1] == CourseType.short_label(CourseType.XGXK)
 
     def test_禁用的课有标记(self, app):
         app.cfg.courses.append(WatchTarget(name="停用课", enabled=False))
@@ -137,6 +136,7 @@ class TestCourseTable:
             "class": tc_class,
             "teacher": teacher,
             "place": place,
+            "time": "周一 1-2节",
             "capacity": capacity,
             "remaining": remaining,
             "selected": (capacity - remaining)
@@ -160,24 +160,15 @@ class TestCourseTable:
         items = app.cap_tree.get_children()
         assert len(items) == 1
         values = app.cap_tree.item(items[0], "values")
+        # 精简后只有四列：课程 / 老师 / 上课时间 / 剩余
         assert values[0] == "科幻文学"
-        assert str(values[2]) == "5"  # 余量列
-        assert values[3] == "有余量"  # 状态列
-        assert CourseType.short_label("XGXK") in values  # 类型列（短标签）（靠后）
+        assert values[1] == "张"  # 老师
+        assert values[2] == "周一 1-2节"  # 上课时间
+        assert str(values[3]) == "5"  # 剩余
 
-    def test_表格包含所有要求的列(self, app):
-        cols = app.cap_tree["columns"]
-        for need in (
-            "course",
-            "type",
-            "class",
-            "teacher",
-            "place",
-            "capacity",
-            "remaining",
-            "status",
-        ):
-            assert need in cols, f"缺少列 {need}"
+    def test_表格只保留必要列(self, app):
+        """界面只留「课程 / 老师 / 上课时间 / 剩余」四列。"""
+        assert app.cap_tree["columns"] == ("course", "teacher", "time", "remaining")
 
     def test_有余量用绿色标签(self, app):
         self._rows(app, [self._row("k1", status="available")])
@@ -199,7 +190,7 @@ class TestCourseTable:
             self._rows(app, [self._row("XGXK:1001", remaining=remaining)])
         items = app.cap_tree.get_children()
         assert len(items) == 1, "同一教学班不该累加出多行"
-        assert app.cap_tree.item(items[0], "values")[2] == "3"
+        assert str(app.cap_tree.item(items[0], "values")[3]) == "3"
 
     def test_不同教学班各自成行(self, app):
         self._rows(
@@ -408,7 +399,7 @@ class TestCourseTable:
         )
         items = app.cap_tree.get_children()
         assert len(items) == 1, "轮询更新同一教学班不该新增行"
-        assert str(app.cap_tree.item(items[0], "values")[2]) == "3"
+        assert str(app.cap_tree.item(items[0], "values")[3]) == "3"
 
     def test_轮询新教学班会被追加(self, app):
         app._update_capacity_rows(
@@ -461,12 +452,9 @@ class TestWatchDetailPanel:
             ],
         }
 
-    def test_中间栏列齐全且关键列靠前(self, app):
-        cols = app.detail_tree["columns"]
-        for need in ("class", "capacity", "selected", "remaining", "status"):
-            assert need in cols, f"缺少列 {need}"
-        # 关键列必须排在最前，否则窄屏下需要横向滚动才看得到
-        assert cols[:5] == ("class", "capacity", "selected", "remaining", "status")
+    def test_中间栏列精简(self, app):
+        """中栏同样只留必要信息，外加教学班号用于区分同名的班。"""
+        assert app.detail_tree["columns"] == ("class", "teacher", "time", "remaining")
 
     def test_渲染教学班与人数(self, app):
         app._detail_course = "金融学概论"
@@ -474,12 +462,10 @@ class TestWatchDetailPanel:
         items = app.detail_tree.get_children()
         assert len(items) == 2
         v = app.detail_tree.item(items[0], "values")
-        # 列序：教学班 / 容量 / 已选 / 余量 / 状态 / 教师 / 时间地点
+        # 列序：教学班 / 老师 / 上课时间 / 剩余
         assert v[0] == "1001"  # 教学班
-        assert v[1] == "120"  # 容量
-        assert v[2] == "121"  # 已选
-        assert v[3] == "0"  # 余量
-        assert v[4] == "已满"  # 状态
+        assert v[1] == "马明"  # 老师
+        assert v[3] == "0"  # 剩余
 
     def test_标题汇总有余量班数(self, app):
         app._detail_course = "金融学概论"
@@ -555,7 +541,7 @@ class TestWatchDetailPanel:
         )
         items = app.detail_tree.get_children()
         assert len(items) == 1
-        assert app.detail_tree.item(items[0], "values")[2] == "121"
+        assert str(app.detail_tree.item(items[0], "values")[3]) == "0"
 
     def test_轮询别的课不动中间栏(self, app):
         app._detail_course = "金融学概论"
