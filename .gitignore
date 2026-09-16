@@ -23,6 +23,20 @@ docs/research/
 docs/notes/
 *.internal.md
 
+# ---- 构建产物（绝不要入库）----
+# 用通配符覆盖 PyInstaller 的各种输出目录命名习惯：
+#   dist/ build/ 以及我调试时用过的 dist1f/ build2/ dist-onefile/ …
+dist/
+dist*/
+dist-*/
+build/
+build*/
+build-*/
+*.spec.bak
+*.pkg
+*.toc
+.venv-build/
+
 # ---- 运行产物 ----
 *.log
 bitxk.log
