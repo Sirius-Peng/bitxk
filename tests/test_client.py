@@ -968,3 +968,171 @@ class TestPaginationAndNotOpen:
         client, _ = make_client(envelope(code="0", msg="系统内部错误"))
         with pytest.raises(ApiError):
             client.query_courses("", batch_code="B", student_code="S")
+
+
+class TestTeachingClassListCompleteness:
+    """体育课：同一门课有多个不同时间的教学班，必须全部取到。
+
+    真实数据结构（实测）与直觉相反：
+
+    * **课程级**（``dataList`` 项）只有 ``courseName`` / ``credit`` /
+      ``tcList`` 等元信息，``classCapacity`` / ``teachingPlace`` /
+      ``teacherName`` / ``numberOfSelected`` **全是 null**；
+    * **所有的容量、时间、老师、已选人数都在 ``tcList`` 子项里**。
+
+    所以「体育/篮球」6 个班分散在一门课的 ``tcList`` 中（星期二 3-4节、
+    星期四 1-2节、星期一 6-7节、星期三 3-4节、星期三 8-9节、星期二 3-4节），
+    解析时必须逐个子项展开，否则整门课的信息都会是空的。
+    """
+
+    @staticmethod
+    def _pe_course(name, classes):
+        """构造一门体育课：课程级字段全 null，数据都在 tcList 里。"""
+        return {
+            "courseName": name,
+            "teachingClassID": None,
+            "classCapacity": None,
+            "teachingPlace": None,
+            "teacherName": None,
+            "numberOfSelected": None,
+            "credit": "1",
+            "tcList": classes,
+        }
+
+    @staticmethod
+    def _tc(tc_id, place, teacher, capacity, selected):
+        return {
+            "teachingClassID": tc_id,
+            "teachingPlace": place,
+            "teacherName": teacher,
+            "classCapacity": str(capacity),
+            "numberOfSelected": str(selected),
+        }
+
+    def test_体育课的所有教学班都被展开(self):
+        """真实场景：体育/篮球 6 个不同时间的班。"""
+        payload = envelope(
+            code="1",
+            totalCount=1,
+            dataList=[
+                self._pe_course(
+                    "体育/篮球",
+                    [
+                        self._tc("SPOG000503", "1-16周 星期二 3-4节 南校区篮球场", "邵喆", 40, 40),
+                        self._tc(
+                            "SPOG000508", "1-16周 星期四 1-2节 南校区篮球场", "吴昱辰", 40, 40
+                        ),
+                        self._tc(
+                            "SPOG000511", "1-16周 星期一 6-7节 南校区篮球场", "谢名杨", 40, 40
+                        ),
+                        self._tc(
+                            "SPOG000513", "1-16周 星期三 3-4节 南校区篮球场", "张程飞", 40, 38
+                        ),
+                        self._tc(
+                            "SPOG000515", "1-16周 星期三 8-9节 南校区篮球场", "张程飞", 40, 40
+                        ),
+                        self._tc(
+                            "SPOG000519", "1-16周 星期二 3-4节 南校区篮球场", "张长礼", 40, 37
+                        ),
+                    ],
+                )
+            ],
+        )
+        client, _ = make_client(payload)
+        courses = client.query_courses(
+            "", teaching_class_type=CourseType.TYKC, batch_code="B", student_code="S"
+        )
+        assert len(courses) == 1
+        tcs = courses[0].teaching_classes
+        assert len(tcs) == 6, f"6 个教学班必须全部展开，实际 {len(tcs)}"
+        assert {t.teaching_class_id for t in tcs} == {
+            "SPOG000503",
+            "SPOG000508",
+            "SPOG000511",
+            "SPOG000513",
+            "SPOG000515",
+            "SPOG000519",
+        }
+
+    def test_每个班的容量时间老师都从tcList取到(self):
+        """课程级字段全 null，绝不能因此丢信息。"""
+        payload = envelope(
+            code="1",
+            totalCount=1,
+            dataList=[
+                self._pe_course(
+                    "体育/网球",
+                    [
+                        self._tc("T1", "1-16周 星期一 6-7节 南校区网球场", "王勇", 40, 24),
+                        self._tc("T2", "1-16周 星期三 8-9节 南校区网球场", "李四", 40, 40),
+                    ],
+                )
+            ],
+        )
+        client, _ = make_client(payload)
+        courses = client.query_courses(
+            "", teaching_class_type=CourseType.TYKC, batch_code="B", student_code="S"
+        )
+        a, b = courses[0].teaching_classes
+        assert a.teacher == "王勇" and a.capacity == 40 and a.remaining == 16
+        assert a.time_short == "星期一 6-7节"
+        assert b.teacher == "李四" and b.remaining == 0
+        assert b.status is CourseStatus.FULL
+        assert a.status is CourseStatus.AVAILABLE
+
+    def test_不同时间的同名班互不覆盖(self):
+        """同一时间有两个班（不同老师）也必须各占一条，不能按时间去重。"""
+        payload = envelope(
+            code="1",
+            totalCount=1,
+            dataList=[
+                self._pe_course(
+                    "体育/篮球",
+                    [
+                        self._tc("A", "1-16周 星期二 3-4节 场1", "老师甲", 40, 40),
+                        self._tc("B", "1-16周 星期二 3-4节 场1", "老师乙", 40, 37),
+                    ],
+                )
+            ],
+        )
+        client, _ = make_client(payload)
+        courses = client.query_courses(
+            "", teaching_class_type=CourseType.TYKC, batch_code="B", student_code="S"
+        )
+        tcs = courses[0].teaching_classes
+        assert len(tcs) == 2
+        assert {t.teacher for t in tcs} == {"老师甲", "老师乙"}
+
+    def test_翻页时按课程数而非教学班数判断(self):
+        """totalCount 数的是**课程**，不是教学班 —— 用教学班数比较会提前收工。"""
+        # 第 0 页：2 门课，每门 3 个班（共 6 个教学班），totalCount=3
+        page0 = envelope(
+            code="1",
+            totalCount=3,
+            dataList=[
+                self._pe_course(
+                    f"体育/课{i}",
+                    [
+                        self._tc(f"{i}-{j}", f"1-16周 星期{j + 1} 1-2节 场", f"师{j}", 40, 10)
+                        for j in range(3)
+                    ],
+                )
+                for i in range(2)
+            ],
+        )
+        page1 = envelope(
+            code="1",
+            totalCount=3,
+            dataList=[
+                self._pe_course(
+                    "体育/课2", [self._tc("2-0", "1-16周 星期一 3-4节 场", "师甲", 40, 5)]
+                )
+            ],
+        )
+        client, http = make_client(page0, page1)
+        courses = client.query_courses(
+            "", teaching_class_type=CourseType.TYKC, batch_code="B", student_code="S", page_size=2
+        )
+        assert len(http.calls) == 2, "必须翻到第 2 页（按课程数 2 < 3 判断）"
+        assert len(courses) == 3
+        assert sum(len(c.teaching_classes) for c in courses) == 7
