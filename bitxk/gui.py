@@ -1305,7 +1305,16 @@ class BitxkApp(ttk.Frame):
                         check_conflict="0",
                     )
                 except BitxkError as exc:
-                    self._log_threadsafe(f"  {CourseType.label(tc_type)} 查询失败：{exc}", "warn")
+                    self._log_threadsafe(
+                        f"  {CourseType.short_label(tc_type)} 查询失败：{exc}", "warn"
+                    )
+                    continue
+
+                if not courses:
+                    # 空结果不等于失败：多数类型在当前批次本就没开放
+                    self._log_threadsafe(
+                        f"  {CourseType.short_label(tc_type)}：未开放或没有课程", "muted"
+                    )
                     continue
 
                 rows = []

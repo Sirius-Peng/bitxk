@@ -879,3 +879,92 @@ class TestBaseUrlHandling:
         )
         with pytest.raises(ApiError, match="意外重定向"):
             client.query_courses("x", batch_code="B", student_code="S")
+
+
+class TestPaginationAndNotOpen:
+    """两个曾导致「查询不到课程」的真实问题。
+
+    1. 只取第一页就返回 —— 实测 XGXK 有 240 门，pageSize=100 时只拿到
+       100 门，后面 140 门永远看不到，用户以为"查不到课"。
+    2. 「课程未开放」被当成错误 —— 服务端返回 code='0' +
+       msg='查询结果:方案内课程未开放[]'，这是**正常状态**（该批次下
+       这类课不存在），早期版本抛异常，界面上就显示成"查询失败"。
+    """
+
+    @staticmethod
+    def _page(items, total):
+        return envelope(code="1", msg="查询数据成功", totalCount=total, dataList=items)
+
+    @staticmethod
+    def _course(name, tc_id):
+        return {
+            "courseName": name,
+            "teachingClassID": tc_id,
+            "classCapacity": 40,
+            "numberOfFirstVolunteer": 10,
+        }
+
+    def test_自动翻页取完所有课程(self):
+        """240 门课必须全部拿到，不能只取第一页。"""
+        pages = [
+            self._page([self._course(f"课{i}", str(i)) for i in range(100)], 240),
+            self._page([self._course(f"课{i}", str(i)) for i in range(100, 200)], 240),
+            self._page([self._course(f"课{i}", str(i)) for i in range(200, 240)], 240),
+        ]
+        client, http = make_client(*pages)
+        courses = client.query_courses("", batch_code="B", student_code="S", page_size=100)
+
+        assert len(courses) == 240, f"应取满 240 门，实际 {len(courses)}"
+        assert len(http.calls) == 3, "应恰好翻 3 页"
+        # 页码要递增
+        for i, call in enumerate(http.calls):
+            setting = json.loads(form_body(call)["querySetting"])
+            assert setting["pageNumber"] == str(i)
+
+    def test_单页取完就不再多请求(self):
+        client, http = make_client(self._page([self._course("课", "1")], 1))
+        client.query_courses("", batch_code="B", student_code="S", page_size=100)
+        assert len(http.calls) == 1
+
+    def test_翻页有上限防止无限拉取(self):
+        """服务端 totalCount 异常时不能无限翻页。"""
+        from bitxk.client import MAX_PAGES
+
+        pages = [self._page([self._course(f"课{i}", str(i))], 99999) for i in range(MAX_PAGES + 5)]
+        client, http = make_client(*pages)
+        client.query_courses("", batch_code="B", student_code="S", page_size=1)
+        assert len(http.calls) == MAX_PAGES
+
+    def test_未开放视为空结果而非错误(self):
+        """code='0' + '未开放' 是正常状态，必须返回空列表。"""
+        payload = envelope(code="0", msg="查询结果:方案内课程未开放[]", dataList=None)
+        client, _ = make_client(payload)
+        courses = client.query_courses(
+            "", teaching_class_type=CourseType.FANKC, batch_code="B", student_code="S"
+        )
+        assert courses == []
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "查询结果:方案内课程未开放[]",
+            "查询结果:方案外课程未开放[]",
+            "查询结果:重修课程未开放[]",
+            "查询结果:辅修未开放[]",
+        ],
+    )
+    def test_各种未开放文案都能识别(self, msg):
+        from bitxk.client import _is_not_open
+
+        assert _is_not_open({"code": "0", "msg": msg}) is True
+
+    def test_其它_code0_仍是错误(self):
+        """别把「未开放」的放行规则扩大到所有 code=0，否则真错误会被吞掉。"""
+        from bitxk.client import _is_not_open
+
+        assert _is_not_open({"code": "0", "msg": "选课时间已结束"}) is False
+
+    def test_真错误依然抛出(self):
+        client, _ = make_client(envelope(code="0", msg="系统内部错误"))
+        with pytest.raises(ApiError):
+            client.query_courses("", batch_code="B", student_code="S")

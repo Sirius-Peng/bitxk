@@ -44,6 +44,7 @@ from .models import (
     SelectionResult,
     TeachingClass,
     _as_bool,
+    _as_int,
     _pick,
 )
 
@@ -64,6 +65,24 @@ _CODE_SUCCESS_ALIASES = {"200"}
 #: 实测前端逻辑：``volunteer.do`` 返回 ``code=='1'`` 表示已受理（异步），
 #: 其余非 302 的值都当作直接失败并把 ``msg`` 弹给用户。
 _CODE_IMMEDIATE_FAILURE = {"0"}
+
+#: 单次查询最多翻多少页（防御：服务端 totalCount 异常时不至于无限拉）
+MAX_PAGES = 20
+
+
+def _is_not_open(payload: dict) -> bool:
+    """判断响应是不是「该类型课程未开放」。
+
+    实测服务端对未开放的课程类型返回::
+
+        {"code": "0", "msg": "查询结果:方案内课程未开放[]", "dataList": null}
+
+    ``code`` 是 ``"0"``（非成功码），但这不是错误 —— 该批次下这类课
+    压根没有。必须当成**正常空结果**，否则界面上会误报"查询失败"。
+    """
+    msg = str(payload.get("msg") or "")
+    return "未开放" in msg or "未开放" in str(payload.get("data") or "")
+
 
 #: 判定「成功」时统一用这个集合
 _ALL_SUCCESS_CODES = _CODE_SUCCESS | _CODE_SUCCESS_ALIASES
@@ -294,6 +313,11 @@ class XkClient:
 
         msg = str(payload.get("msg") or payload.get("message") or "")
 
+        # 「课程未开放」是正常状态而非错误：code='0' 但语义是"这类课不存在"。
+        # 必须放行，让调用方拿到 payload 后自行返回空结果。
+        if _is_not_open(payload):
+            return
+
         if is_auth_failure(msg, code_str):
             raise TokenExpired(f"接口 {path} 要求重新登录：{msg or code_str}")
         if "频繁" in msg or "限制" in msg:
@@ -421,29 +445,57 @@ class XkClient:
             "checkCapacity": check_capacity,
             "queryContent": keyword,
         }
-        setting = json.dumps(
-            {
-                "data": data,
-                "pageSize": str(page_size),
-                "pageNumber": str(page_number),
-                "order": order,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
 
         path = CourseType.endpoint(teaching_class_type)
-        payload = self._post(path, {"querySetting": setting})
 
-        # dataList 与 data 平级，不在 data 里面
-        items = _pick(payload, "dataList", "list", "rows") or []
-        if isinstance(items, dict):
-            items = _pick(items, "dataList", "list", "rows") or []
-        courses = [
-            Course.from_api(item, teaching_class_type=teaching_class_type)
-            for item in items
-            if isinstance(item, dict)
-        ]
+        courses: list[Course] = []
+        page = page_number
+        while True:
+            data["pageNumber"] = str(page)
+            payload = self._post(
+                path,
+                {
+                    "querySetting": json.dumps(
+                        {
+                            "data": data,
+                            "pageSize": str(page_size),
+                            "pageNumber": str(page),
+                            "order": order,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                },
+            )
+
+            # 「课程未开放」是**正常状态**，不是错误：服务端返回
+            # code='0' + msg='查询结果:方案内课程未开放[]'。
+            # 这类批次下该类型的课根本不存在，当成空结果即可 ——
+            # 早期版本把它当异常抛出，界面上就显示成"查询失败"了。
+            if _is_not_open(payload):
+                logger.debug("%s(%s) 未开放", keyword, teaching_class_type)
+                break
+
+            # dataList 与 data 平级，不在 data 里面
+            items = _pick(payload, "dataList", "list", "rows") or []
+            if isinstance(items, dict):
+                items = _pick(items, "dataList", "list", "rows") or []
+            courses.extend(
+                Course.from_api(item, teaching_class_type=teaching_class_type)
+                for item in items
+                if isinstance(item, dict)
+            )
+
+            # 翻页直到取完 —— 实测 XGXK 有 240 门，只取第一页会漏掉
+            # 大部分课程，用户会以为"查不到课"。
+            total = _as_int(_pick(payload, "totalCount", "total", "count"))
+            page += 1
+            if not items or total is None or len(courses) >= total:
+                break
+            if page > page_number + MAX_PAGES - 1:
+                logger.warning("%s 课程过多，只取了前 %d 页", keyword, MAX_PAGES)
+                break
+
         logger.debug("查询 %s(%s) 命中 %d 门课", keyword, teaching_class_type, len(courses))
         return courses
 
