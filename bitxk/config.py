@@ -324,6 +324,13 @@ def load_config(path: str | Path | None = None) -> Config:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"配置文件 {path} 语法错误：{exc}") from exc
+    except UnicodeDecodeError as exc:
+        # 不是合法 UTF-8 —— Windows 上用记事本另存为 ANSI(GBK) 就会这样。
+        # 必须给出可操作的提示，不然用户只看到一串编码错误。
+        raise ConfigError(
+            f"配置文件 {path} 不是 UTF-8 编码（{exc.reason}）。\n"
+            f"请用支持 UTF-8 的编辑器（如 VS Code、Notepad++）另存为 UTF-8 后重试。"
+        ) from exc
     except OSError as exc:
         raise ConfigError(f"无法读取配置文件 {path}：{exc}") from exc
 

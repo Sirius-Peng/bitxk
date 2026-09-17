@@ -9,6 +9,7 @@ tkinter 需要显示环境，所以在无头 CI 上整组跳过；本机跑时�
 
 from __future__ import annotations
 
+import os
 import tomllib
 
 import pytest
@@ -764,6 +765,7 @@ class TestSaveConfig:
 
         assert load_config(out).courses[0].name == tricky
 
+    @pytest.mark.skipif(os.name == "nt", reason="Windows 的 chmod 只支持只读位，没有 POSIX 权限")
     def test_配置文件权限收紧(self, app, tmp_path):
         from bitxk.gui import save_config
 

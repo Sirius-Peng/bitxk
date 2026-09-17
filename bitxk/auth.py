@@ -254,7 +254,11 @@ class Session:
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError 覆盖 json.JSONDecodeError **和 UnicodeDecodeError**。
+            # 后者不能漏：文件不是合法 UTF-8 时 read_text 会抛它，而它不是
+            # JSONDecodeError 的子类。Windows 上用户拿记事本之类的编辑器改过
+            # 会话文件就会变成 GBK，漏掉它会让整个程序崩在启动路径上。
             logger.warning("会话文件损坏，忽略：%s", exc)
             return None
         session = cls.from_dict(data)

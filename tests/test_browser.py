@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 import platform
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -135,11 +137,17 @@ class TestSessionSetup:
             # 默认用临时目录，且该目录确实被创建出来了
             assert "bitxk-chrome-" in str(temp_session.profile_dir)
         finally:
+            profile = temp_session.profile_dir
             temp_session.cleanup_profile()
-            assert not temp_session.profile_dir.exists()
+            # Windows 上删除可能滞后（杀软/索引器还持着句柄），轮询一下再断言
+            for _ in range(50):
+                if not profile.exists():
+                    break
+                time.sleep(0.1)
+            assert not profile.exists()
 
-        persistent = ChromiumSession(browser, profile_dir="/tmp/bitxk-test-persist")
-        assert str(persistent.profile_dir) == "/tmp/bitxk-test-persist"
+        persistent = ChromiumSession(browser, profile_dir=tempfile.mkdtemp())
+        assert persistent.profile_dir == Path(persistent.profile_dir)
 
     def test_reuse_profile_走默认持久目录(self):
         browser = BrowserInfo("fake", Path("/bin/sh"), "test")

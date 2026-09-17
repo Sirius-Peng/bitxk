@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import os
 
 import pytest
 
@@ -119,10 +120,18 @@ class TestSession:
         assert loaded.cookies == {"JSESSIONID": "abc"}
         assert loaded.student_name == "张三"
 
+    @pytest.mark.skipif(os.name == "nt", reason="Windows 的 chmod 只支持只读位，没有 POSIX 权限")
     def test_会话文件权限收紧(self, tmp_path):
         path = tmp_path / "s.json"
         Session(token="t").save(path)
         assert oct(path.stat().st_mode)[-3:] == "600"
+
+    def test_会话文件不是_UTF8_时返回_None_而不抛异常(self, tmp_path):
+        """Windows 上文件常是 GBK。read_text 抛的是 UnicodeDecodeError，
+        它不是 json.JSONDecodeError 的子类，只捕获后者会漏掉并让程序崩溃。"""
+        path = tmp_path / "gbk.json"
+        path.write_bytes('{"token": "令牌"}'.encode("gbk"))
+        assert Session.load(path) is None
 
     def test_文件不存在返回_None(self, tmp_path):
         assert Session.load(tmp_path / "nope.json") is None
