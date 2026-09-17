@@ -601,10 +601,15 @@ class BitxkApp(ttk.Frame):
         return cfg.base_dir / cfg.session_file
 
     def _restore_session(self) -> None:
-        """启动时尝试恢复上次的登录态。
+        """启动时恢复上次的登录态，并在后台**真正校验**一次。
 
         没有这一步的话，每次开图形界面都是"未登录"，用户必须重新点一次
         「用浏览器登录」—— 命令行版一直是会缓存的，图形界面版此前漏了。
+
+        校验必须打真实接口：本地时钟不可靠，而且浏览器侧的选课系统 cookie
+        （``JSESSIONID`` / ``GS_SESSIONID`` / ``_WEU``）都是**会话 cookie**，
+        关掉浏览器就没了 —— 所以"重开程序还能不能免登录"完全取决于这份缓存
+        有没有效，猜不得。校验放到后台线程，不阻塞界面。
         """
         from .auth import Session
 
@@ -618,14 +623,50 @@ class BitxkApp(ttk.Frame):
 
         self.session = cached
         who = cached.student_name or cached.student_code or "上次的账号"
-        fresh = cached.is_probably_fresh()
-        self.login_var.set(f"登录态：{who}" + ("" if fresh else "（可能已过期）"))
-        if fresh:
+        self.login_var.set(f"登录态：{who}（校验中…）")
+        self.log(f"已恢复上次的登录态：{who}，正在向服务端校验…", "muted")
+        threading.Thread(target=self._restore_verify_worker, args=(cached,), daemon=True).start()
+
+    def _restore_verify_worker(self, cached) -> None:
+        """后台校验恢复出来的会话，把结论交给主线程渲染。"""
+        from .auth import check_session
+
+        cfg = self.cfg or Config(base_dir=self.config_path.parent)
+        verdict = check_session(
+            cached,
+            min_interval=cfg.poll.min_request_interval,
+            timeout=cfg.http.timeout,
+            verify=cfg.http.verify_ssl,
+            proxy=cfg.http.proxy or None,
+        )
+        self.events.put(_GuiEvent("restore_session", {"verdict": verdict.value}))
+
+    def _render_restore_session(self, verdict: str) -> None:
+        """恢复登录态的校验结果。"""
+        from .auth import SessionCheck
+
+        who = "上次的账号"
+        if self.session is not None:
+            who = self.session.student_name or self.session.student_code or who
+
+        if verdict == SessionCheck.VALID.value:
+            self.login_var.set(f"登录态：{who}")
             self.login_label.configure(foreground=COLORS["success"])
-            self.log(f"已恢复上次的登录态：{who}", "ok")
-        else:
+            self.log(f"登录态仍然有效，可以直接查询和抢课（{who}）", "ok")
+        elif verdict == SessionCheck.UNKNOWN.value:
+            # 网络问题不是登录问题 —— 绝不能因此把登录态丢掉
+            self.login_var.set(f"登录态：{who}（未能联网校验）")
             self.login_label.configure(foreground=COLORS["warning"])
-            self.log(f"已恢复上次的登录态：{who}（超过 15 分钟，建议点「校验登录态」）", "warn")
+            self.log(
+                "暂时连不上选课系统，无法校验登录态。登录信息已保留，"
+                "校园网恢复后点「验证登录」即可。",
+                "warn",
+            )
+        else:
+            self.session = None
+            self.login_var.set("登录态：已失效")
+            self.login_label.configure(foreground=COLORS["danger"])
+            self.log("上次的登录态已失效，请点「用浏览器登录」重新登录。", "warn")
 
     def _remember_session(self, session, *, quiet: bool = False) -> None:
         """把登录态写到磁盘，供下次启动恢复。失败不影响主流程。
@@ -1024,6 +1065,8 @@ class BitxkApp(ttk.Frame):
             self.login_label.configure(foreground=COLORS["danger"])
             self.log(f"登录态失效：{payload['message']}", "err")
             self._set_busy(False)
+        elif kind == "restore_session":
+            self._render_restore_session(payload["verdict"])
         elif kind == "detail_rows":
             self._render_detail(payload)
         elif kind == "detail_failed":

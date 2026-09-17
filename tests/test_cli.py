@@ -367,7 +367,9 @@ class TestCachedSessionResilience:
             def student_info(self, *_a, **_k):
                 raise NetworkError("SSL EOF")
 
-        monkeypatch.setattr("bitxk.cli._client", BoomClient)
+        # check_session 内部直接用 XkClient（配自己新建的 HttpClient），
+        # 所以打桩点在这里，而不是 cli._client
+        monkeypatch.setattr("bitxk.client.XkClient", BoomClient)
 
         args = cli.parse_args(["list"])
         with pytest.raises(BitxkError, match="网络"):
@@ -391,7 +393,7 @@ class TestCachedSessionResilience:
             def student_info(self, *_a, **_k):
                 raise TokenExpired("登录态失效")
 
-        monkeypatch.setattr("bitxk.cli._client", ExpiredClient)
+        monkeypatch.setattr("bitxk.client.XkClient", ExpiredClient)
 
         args = cli.parse_args(["-u", "1", "-p", "pw", "list"])
         # 会话失效 → 应转入账号密码登录；密码给了但登录会打到真实网络，

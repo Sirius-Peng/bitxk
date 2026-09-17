@@ -39,15 +39,16 @@ import secrets
 import string
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .exceptions import CaptchaRequired, LoginError, ServerBusy
+from .exceptions import BitxkError, CaptchaRequired, LoginError, ServerBusy
 from .http import HttpClient
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Credentials", "Session", "BitAuth", "encrypt_password"]
+__all__ = ["Credentials", "Session", "BitAuth", "encrypt_password", "SessionCheck", "check_session"]
 
 # --------------------------------------------------------------------------
 # 站点常量
@@ -662,6 +663,68 @@ def _extract_error_element(html: str, element_id: str) -> str | None:
     text = re.sub(r"<[^>]+>", " ", match.group(1))
     text = re.sub(r"\s+", " ", text).strip()
     return text or None
+
+
+class SessionCheck(Enum):
+    """缓存会话的检验结果。"""
+
+    #: 服务端确认可用
+    VALID = "valid"
+    #: 服务端明确说登录失效 —— 可以断定要重新登录
+    EXPIRED = "expired"
+    #: 网络不通 / 被限流 —— 无法判断，**不能**据此丢掉会话
+    UNKNOWN = "unknown"
+
+
+def check_session(
+    session: Session,
+    *,
+    min_interval: float = 0.0,
+    timeout: float = 15.0,
+    verify: bool = True,
+    proxy: str | None = None,
+) -> SessionCheck:
+    """拿一份缓存会话去试探服务端，判断它还有没有效。
+
+    以 ``student/<学号>.do`` 为判据：它会真正校验服务端会话，未登录返回 302，
+    登录后返回学生信息 JSON。
+
+    关键设计：**只有服务端明确说失效才算失效**。网络异常一律归为
+    :attr:`SessionCheck.UNKNOWN` —— 实测踩过：一次 SSL EOF 就被当成"登录失效"，
+    把好好的登录态扔掉并要求重新输密码。
+
+    自己的会话自己关，不会影响调用方传入的 :class:`HttpClient`。
+    """
+    from .client import XkClient
+    from .exceptions import NetworkError, RateLimited, TokenExpired
+    from .http import HttpClient
+
+    if not session or not session.token:
+        return SessionCheck.EXPIRED
+
+    http = HttpClient(
+        min_interval=min_interval,
+        timeout=timeout,
+        max_retries=0,
+        verify=verify,
+        proxy=proxy,
+    )
+    http.cookies = dict(session.cookies)
+    http.set_token(session.token)
+    http.student_code = session.student_code
+    try:
+        XkClient(http).student_info(session.student_code)
+    except TokenExpired:
+        return SessionCheck.EXPIRED
+    except (NetworkError, RateLimited):
+        return SessionCheck.UNKNOWN
+    except BitxkError:
+        # 其余业务性错误（不在批次内、参数问题等）说明会话本身是通的
+        return SessionCheck.VALID
+    else:
+        return SessionCheck.VALID
+    finally:
+        http.close()
 
 
 def _extract_error_tip(html: str) -> str | None:

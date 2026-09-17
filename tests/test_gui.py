@@ -21,9 +21,19 @@ tk = pytest.importorskip("tkinter", reason="没有 tkinter，跳过界面测试"
 
 
 @pytest.fixture
-def app(tmp_path):
-    """构造一个真实窗口，并在测试结束后销毁。"""
+def app(tmp_path, monkeypatch):
+    """构造一个真实窗口，并在测试结束后销毁。
+
+    界面启动时会尝试恢复上次的登录态并**向服务端校验**，测试必须保持离线。
+    这里把校验打成"无法判断"，顺带覆盖真实场景的一个要求：校园网不可达时
+    登录态必须被保留，而不是被当成失效丢掉。
+    """
     import tkinter as tk_mod
+
+    from bitxk.auth import SessionCheck
+
+    monkeypatch.setattr("bitxk.auth.check_session", lambda *a, **k: SessionCheck.UNKNOWN)
+    monkeypatch.setattr("bitxk.gui.BitxkApp._restore_verify_worker", lambda self, cached: None)
 
     try:
         root = tk_mod.Tk()
@@ -662,32 +672,52 @@ class TestEventPump:
         assert reloaded.token == "T"
         assert reloaded.student_code == "1120252751"
 
-    def test_启动时恢复上次的登录态(self, tmp_path):
-        """重开程序应当自动恢复，而不是显示"未登录"。"""
-        import tkinter as tk_mod
+    def _restore_with_verdict(self, app, tmp_path, monkeypatch, verdict):
+        """让"上次登录留下的"会话被恢复，并指定服务端校验的结论。
 
+        复用 ``app`` fixture 已经建好的窗口 —— 同一个进程里再建第二个 Tk root
+        会让 ``update()`` 卡死（实测），所以不能自己 new 一个。
+        """
         from bitxk.auth import Session
-        from bitxk.gui import BitxkApp
 
-        # 先造一个"上次登录留下的"会话文件
         Session(token="T2", student_code="1120252751", student_name="彭煜涵").save(
             tmp_path / ".bitxk_session.json"
         )
+        # _restore_session 会起后台线程做校验；测试里不必真的起线程，
+        # 直接把结论交给渲染层，保持确定性。
+        monkeypatch.setattr("bitxk.gui.BitxkApp._restore_verify_worker", lambda self, cached: None)
+        app._restore_session()
+        app._render_restore_session(verdict)
 
-        try:
-            root = tk_mod.Tk()
-        except tk_mod.TclError:
-            pytest.skip("没有可用的显示环境")
-        root.withdraw()
-        application = BitxkApp(root, config_path=tmp_path / "config.toml")
-        root.update()
-        try:
-            assert application.session is not None
-            assert application.session.token == "T2"
-            assert "彭煜涵" in application.login_var.get()
-            assert "已恢复上次的登录态" in application.log_text.get("1.0", "end")
-        finally:
-            root.destroy()
+    def test_启动时恢复上次的登录态(self, app, tmp_path, monkeypatch):
+        """重开程序应当自动恢复，而不是显示"未登录"。"""
+        from bitxk.auth import SessionCheck
+
+        self._restore_with_verdict(app, tmp_path, monkeypatch, SessionCheck.VALID.value)
+        assert app.session is not None
+        assert app.session.token == "T2"
+        assert "彭煜涵" in app.login_var.get()
+        log = app.log_text.get("1.0", "end")
+        assert "已恢复上次的登录态" in log
+        assert "仍然有效" in log
+
+    def test_恢复的登录态失效时清掉(self, app, tmp_path, monkeypatch):
+        from bitxk.auth import SessionCheck
+
+        self._restore_with_verdict(app, tmp_path, monkeypatch, SessionCheck.EXPIRED.value)
+        assert app.session is None
+        assert "已失效" in app.login_var.get()
+        assert "请点「用浏览器登录」重新登录" in app.log_text.get("1.0", "end")
+
+    def test_网络不通时不丢登录态(self, app, tmp_path, monkeypatch):
+        """实测踩过的坑：一次 SSL EOF 不该把好好的登录态扔掉。"""
+        from bitxk.auth import SessionCheck
+
+        self._restore_with_verdict(app, tmp_path, monkeypatch, SessionCheck.UNKNOWN.value)
+        assert app.session is not None, "联网失败时不能丢弃登录态"
+        assert app.session.token == "T2"
+        assert "未能联网校验" in app.login_var.get()
+        assert "登录信息已保留" in app.log_text.get("1.0", "end")
 
     def test_没有缓存会话时保持未登录(self, app):
         assert app.session is None

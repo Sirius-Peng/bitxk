@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .auth import API_BASE, CAS_LOGIN_URL, BitAuth, Session
+from .auth import API_BASE, CAS_LOGIN_URL, BitAuth, Session, SessionCheck, check_session
 from .client import XkClient
 from .config import DEFAULT_CONFIG_NAME, SAMPLE_CONFIG, Config, load_config
 from .exceptions import (
@@ -30,9 +30,7 @@ from .exceptions import (
     CaptchaRequired,
     ConfigError,
     LoginError,
-    NetworkError,
     NotInBatchError,
-    RateLimited,
     TokenExpired,
 )
 from .http import HttpClient
@@ -656,40 +654,29 @@ def _connect(cfg: Config, args, *, need_login: bool = True) -> tuple[HttpClient,
     #   2. 不要用"会话年龄"来预判新鲜度 —— 本地时间不可靠，服务端才是
     #      权威。直接拿它试一次接口，失败再登录，这样最稳。
     if cached_session and cached_session.token:
-        probe = HttpClient(
+        verdict = check_session(
+            cached_session,
             min_interval=cfg.poll.min_request_interval,
             timeout=cfg.http.timeout,
-            max_retries=0,
             verify=cfg.http.verify_ssl,
             proxy=cfg.http.proxy or None,
         )
-        probe.cookies = cached_session.cookies
-        probe.set_token(cached_session.token)
-        probe.student_code = cached_session.student_code
-        try:
-            _client(cfg, probe).student_info(cached_session.student_code)
-        except TokenExpired as exc:
-            # 只有**明确的登录失效**才丢弃缓存会话。
-            logger.debug("缓存会话已失效（%s），改为重新登录", exc)
-        except (NetworkError, RateLimited) as exc:
+        if verdict is SessionCheck.UNKNOWN:
             # 网络抖动 / 被限流不是登录问题 —— 不能因此把会话丢掉并要求
             # 重新输密码（实测踩过：一次 SSL EOF 就触发了重新登录流程，
-            # 把好好的登录态扔了）。这类错误直接上抛，让用户重试。
-            probe.close()
+            # 把好好的登录态扔了）。直接上抛，让用户重试。
             raise BitxkError(
-                f"校验本地登录态时网络异常：{exc}\n"
-                "登录态本身没有失效（已保留缓存），请检查网络后重试。"
-            ) from exc
-        except BitxkError as exc:
-            logger.debug("缓存会话校验失败（%s），保守起见改为重新登录", exc)
-        else:
+                "校验本地登录态时网络异常。\n登录态本身没有失效（已保留缓存），请检查网络后重试。"
+            )
+        if verdict is SessionCheck.VALID:
+            http.cookies = dict(cached_session.cookies)
+            http.set_token(cached_session.token)
+            http.student_code = cached_session.student_code
             log_ok(
                 f"复用本地缓存会话（{cached_session.student_name or cached_session.student_code}）"
             )
-            return probe, _client(cfg, probe), cached_session
-        finally:
-            if probe is not http:
-                probe.close()
+            return http, _client(cfg, http), cached_session
+        logger.debug("缓存会话已失效，改为重新登录")
 
     if not need_login:
         return http, _client(cfg, http), Session(token="")
