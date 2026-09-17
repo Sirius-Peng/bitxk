@@ -151,6 +151,8 @@ macOS 上还会执行 `strip` 精简二进制；Windows 上不能 `strip`，会�
 | 提示未找到 Inno Setup | 见上一节；只是少一个安装包，其余产物照常 |
 | 打包出的程序启动就闪退 | 用命令行版 `bitxk.exe` 跑一次，它会把 traceback 打在控制台 |
 | Windows 上中文显示成乱码 | 已内置 ASCII 降级（GBK 控制台打不出 `✓` 会崩）；若仍异常请附上完整输出 |
+| 改过 `build-release.ps1` 后报语法错误 | 该文件**必须带 UTF-8 BOM**。PowerShell 5.1 在中文系统上会把无 BOM 的 `.ps1` 按 GBK 读，里面的中文字符串会解析崩。用编辑器另存为「UTF-8 with BOM」即可 |
+| Windows 上报 `$LASTEXITCODE` 判断不对 | 原生命令的 stderr 在 `$ErrorActionPreference='Stop'` 下会被升级成终止错误。脚本里用 `Probe { }` 包住这类调用（PyInstaller / ISCC 的进度日志都写在 stderr） |
 
 ## 发布流程
 
