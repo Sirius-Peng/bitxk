@@ -370,16 +370,42 @@ class ChromiumSession:
             return False
 
     def close(self) -> None:
-        """关闭 WebSocket；仅在由本对象启动时结束浏览器进程。"""
+        """关闭浏览器。
+
+        优先走 CDP 的 ``Browser.close`` **优雅退出**，而不是直接 terminate。
+
+        这一点很重要，且是实测踩出来的：Windows 上 ``Popen.terminate()`` 等于
+        ``TerminateProcess``，Chrome 来不及把 profile 落盘就没了 —— 表现是
+        ``Default/Network/Cookies`` 的 mtime 永远停在很久以前，用户下次打开
+        浏览器还是未登录态（"每次都要重新登录"的根因之一）。优雅退出后
+        同一文件会被正常写入，持久 cookie 得以跨会话保留。
+        """
+        if self._owns_process and self._ws is not None:
+            # 先请浏览器自己收尾：把 cookie / 会话状态刷到磁盘
+            with contextlib.suppress(Exception):
+                self._call("Browser.close", {}, timeout=5.0)
+            with contextlib.suppress(Exception):
+                self._wait_exit(timeout=6.0)
         self._teardown_ws()
-        if self._owns_process and self._process is not None:
-            try:
+        # 优雅退出没成功（比如版本不支持 Browser.close）就退回强杀
+        if self._owns_process and self._process is not None and self._process.poll() is None:
+            with contextlib.suppress(Exception):
                 self._process.terminate()
+            with contextlib.suppress(Exception):
                 self._process.wait(timeout=8)
-            except (subprocess.TimeoutExpired, OSError):
+            if self._process.poll() is None:
                 with contextlib.suppress(Exception):
                     self._process.kill()
         self._process = None
+
+    def _wait_exit(self, timeout: float = 6.0) -> bool:
+        """等浏览器进程退出；退出返回 True。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._process is None or self._process.poll() is not None:
+                return True
+            time.sleep(0.2)
+        return False
 
     def cleanup_profile(self) -> None:
         """删掉临时 profile 目录（只在本对象创建了临时目录时有效）。"""

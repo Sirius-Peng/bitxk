@@ -648,6 +648,71 @@ class TestEventPump:
         assert "张三" in app.login_var.get()
         assert app.session is not None
 
+    def test_login_ok_会把登录态写进磁盘(self, app, tmp_path):
+        """图形界面此前从不保存登录态，导致每次打开都要重新登录。"""
+        from bitxk.auth import Session
+
+        session = Session(token="T", student_code="1120252751", student_name="彭煜涵")
+        self._send(app, "login_ok", {"session": session, "name": "彭煜涵", "code": "1120252751"})
+
+        saved = tmp_path / ".bitxk_session.json"
+        assert saved.exists(), "登录成功后应当落盘"
+        reloaded = Session.load(saved)
+        assert reloaded is not None
+        assert reloaded.token == "T"
+        assert reloaded.student_code == "1120252751"
+
+    def test_启动时恢复上次的登录态(self, tmp_path):
+        """重开程序应当自动恢复，而不是显示"未登录"。"""
+        import tkinter as tk_mod
+
+        from bitxk.auth import Session
+        from bitxk.gui import BitxkApp
+
+        # 先造一个"上次登录留下的"会话文件
+        Session(token="T2", student_code="1120252751", student_name="彭煜涵").save(
+            tmp_path / ".bitxk_session.json"
+        )
+
+        try:
+            root = tk_mod.Tk()
+        except tk_mod.TclError:
+            pytest.skip("没有可用的显示环境")
+        root.withdraw()
+        application = BitxkApp(root, config_path=tmp_path / "config.toml")
+        root.update()
+        try:
+            assert application.session is not None
+            assert application.session.token == "T2"
+            assert "彭煜涵" in application.login_var.get()
+            assert "已恢复上次的登录态" in application.log_text.get("1.0", "end")
+        finally:
+            root.destroy()
+
+    def test_没有缓存会话时保持未登录(self, app):
+        assert app.session is None
+        assert "未登录" in app.login_var.get()
+
+    def test_损坏的会话文件不影响启动(self, tmp_path):
+        """会话文件坏掉只该被忽略，不能让界面起不来。"""
+        import tkinter as tk_mod
+
+        from bitxk.gui import BitxkApp
+
+        (tmp_path / ".bitxk_session.json").write_bytes(b"\xff\xfe not utf8 at all")
+
+        try:
+            root = tk_mod.Tk()
+        except tk_mod.TclError:
+            pytest.skip("没有可用的显示环境")
+        root.withdraw()
+        application = BitxkApp(root, config_path=tmp_path / "config.toml")
+        root.update()
+        try:
+            assert application.session is None
+        finally:
+            root.destroy()
+
     def test_verify_fail_把登录态标为失效(self, app):
         self._send(app, "verify_fail", {"message": "token 失效"})
         assert "失效" in app.login_var.get()

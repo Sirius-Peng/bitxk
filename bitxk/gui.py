@@ -592,6 +592,63 @@ class BitxkApp(ttk.Frame):
 
     # ================================================================ 配置
 
+    def _session_path(self) -> Path:
+        """会话缓存文件的位置（与命令行版保持一致）。
+
+        放在配置文件旁边，这样"在哪个目录用就在哪个目录留登录态"。
+        """
+        cfg = self.cfg or Config(base_dir=self.config_path.parent)
+        return cfg.base_dir / cfg.session_file
+
+    def _restore_session(self) -> None:
+        """启动时尝试恢复上次的登录态。
+
+        没有这一步的话，每次开图形界面都是"未登录"，用户必须重新点一次
+        「用浏览器登录」—— 命令行版一直是会缓存的，图形界面版此前漏了。
+        """
+        from .auth import Session
+
+        try:
+            cached = Session.load(self._session_path())
+        except Exception as exc:  # pragma: no cover - 兜底
+            logger.debug("读取缓存会话失败：%s", exc)
+            return
+        if not cached or not cached.token:
+            return
+
+        self.session = cached
+        who = cached.student_name or cached.student_code or "上次的账号"
+        fresh = cached.is_probably_fresh()
+        self.login_var.set(f"登录态：{who}" + ("" if fresh else "（可能已过期）"))
+        if fresh:
+            self.login_label.configure(foreground=COLORS["success"])
+            self.log(f"已恢复上次的登录态：{who}", "ok")
+        else:
+            self.login_label.configure(foreground=COLORS["warning"])
+            self.log(f"已恢复上次的登录态：{who}（超过 15 分钟，建议点「校验登录态」）", "warn")
+
+    def _remember_session(self, session, *, quiet: bool = False) -> None:
+        """把登录态写到磁盘，供下次启动恢复。失败不影响主流程。
+
+        Args:
+            quiet: 轮询结束时刷新登录态就不要再报一次"已保存"，免得刷屏。
+        """
+        if session is None or not getattr(session, "token", None):
+            return
+        try:
+            session.save(self._session_path())
+            if not quiet:
+                self.log(
+                    f"登录态已保存，下次打开不用重新登录（{self._session_path().name}）",
+                    "muted",
+                )
+        except OSError as exc:
+            # 例如程序装在只读目录：给出可操作的提示，而不是静默失败
+            self.log(f"登录态保存失败（{exc}）。把配置放到可写目录即可避免重复登录。", "warn")
+        except Exception as exc:  # pragma: no cover - 兜底
+            # 会话对象缺少 save（测试替身）或其它意外，都不该影响主流程
+            logger.debug("保存登录态失败：%s", exc)
+
     def _load_config_into_ui(self) -> None:
         try:
             self.cfg = load_config(self.config_path)
@@ -608,6 +665,7 @@ class BitxkApp(ttk.Frame):
                 self.log(f"配置里的学号：{self.cfg.username}", "muted")
 
         self._refresh_course_tree()
+        self._restore_session()
 
     def _refresh_course_tree(self) -> None:
         self.course_tree.delete(*self.course_tree.get_children())
@@ -947,6 +1005,7 @@ class BitxkApp(ttk.Frame):
             self.login_var.set(f"登录态：{name}")
             self.login_label.configure(foreground=COLORS["success"])
             self.log(f"登录成功：{name}", "ok")
+            self._remember_session(self.session)
             self._set_busy(False)
         elif kind == "login_fail":
             self.log(f"浏览器登录失败：{payload['message']}", "err")
@@ -999,6 +1058,8 @@ class BitxkApp(ttk.Frame):
             self.log(f"运行结束：{stats.summary()}", "ok" if payload["success"] else "warn")
             if not payload["started"]:
                 self.log("启动未完成，请检查上面的错误信息。", "err")
+            # 轮询过程中可能自动重登过，把最新的登录态落盘
+            self._remember_session(self.session, quiet=True)
             self._set_busy(False)
         elif kind == "fatal":
             self.log(payload["message"], "err")
