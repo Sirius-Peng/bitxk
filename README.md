@@ -458,16 +458,16 @@ bitxk gui
 
 | 文件 | 大小 | 适合谁 |
 |---|---|---|
-| `BIT-Course-Helper-0.1.0-setup.exe` | 21 MB | **推荐。** 双击安装，自动建开始菜单与桌面快捷方式；**按用户安装，不需要管理员权限** |
+| `BIT-Course-Helper-0.1.0-setup.exe` | 40 MB | **推荐。** 双击安装，自动建开始菜单与桌面快捷方式；**按用户安装，不需要管理员权限** |
 | `...-windows-portable-gui.exe` | 14 MB | 不想安装：单个 exe，双击即用图形界面 |
 | `...-windows-portable-cli.exe` | 14 MB | 不想安装、要用命令行：单个 exe，输出能正常打印 |
-| `...-windows-x64.zip` | 29 MB | 需要频繁跑命令行：解压后启动最快（0.1 秒，单文件版要 1.4 秒） |
+| `...-windows-x64.zip` | 46 MB | 需要频繁跑命令行：解压后启动最快（0.1 秒，单文件版要 1.4 秒） |
 
 **macOS**
 
 | 文件 | 大小 | 适合谁 |
 |---|---|---|
-| `BIT-Course-Helper-0.1.0-macos.tar.gz` | 24 MB | 完整包：`.app`（双击开界面）+ 命令行版 |
+| `BIT-Course-Helper-0.1.0-macos.tar.gz` | 41 MB | 完整包：`.app`（双击开界面）+ 命令行版 |
 | `...-macos-portable-gui` | 13 MB | 单个可执行文件，直接双击开界面 |
 | `...-macos-portable-cli` | 13 MB | 单个可执行文件，命令行用（启动 0.2 秒） |
 
@@ -482,7 +482,7 @@ bitxk gui
 
 ### 关于体积
 
-发行包只有 20MB 出头，**因为它不包含浏览器内核**。
+发行包 40MB 上下，**大头是 Python 运行时和图形界面库，不含浏览器内核**。
 
 「用浏览器登录」这个功能驱动的是你**本机已经装好的** Chrome / Edge / Chromium / Brave，
 工具通过 DevTools Protocol 连过去取登录态。所以：
@@ -490,28 +490,72 @@ bitxk gui
 | 方案 | 包体积 |
 |---|---|
 | 打包 Playwright / Selenium（自带内核） | ~250MB |
-| **本工具（复用系统浏览器）** | **~24MB** |
+| **本工具（复用系统浏览器）** | **~40MB** |
 
 打包时还做了这些裁剪：
 
 - 排除了 `cryptography` / `bcrypt` / `cffi` —— 它们不是本项目的依赖，
   只是恰好装在构建机上被 PyInstaller 顺手收了进来（省约 11MB）；
 - 排除了 `numpy` / `pandas` / `PIL` / 其它 GUI 框架 / 开发期工具；
-- 二进制符号表已 strip。
-
-如果你只要命令行、不需要图形界面，包里另附**精简版**（`BIT-Course-Helper-cli/`），
-去掉了 tkinter 与 Tcl/Tk，再小约 11MB。
+- macOS 上二进制符号表已 strip（Windows 上不能 strip，spec 里按平台做了判断）。
 
 包内结构：
 
-* `BIT-Course-Helper.app`（Windows 上是 `bitxk-gui.exe`）—— **双击就用**，图形界面；
-* `BIT-Course-Helper-cli/`（Windows 上是 `bitxk.exe`）—— 命令行版，给脚本 / 计划任务。
+```
+bitxk-gui / bitxk-gui.exe    图形界面，双击这个
+bitxk / bitxk.exe            命令行版 —— 和图形界面**共用同一份运行库**
+portable/                    单文件便携版，免解压
+config.example.toml  README.md  LICENSE
+```
+
+两个程序共用一份 `_internal/`，所以同时提供图形界面和命令行**不额外占体积**。
+
+> 打包时**不会**再塞一份精简命令行版（`bitxk-cli.spec` 仍会构建，但不进发行包）。
+> 它要再带一整套运行库（约 22MB），而功能上没有任何增量 ——
+> `bitxk` 命令行程序本来就在文件夹版里。这一条让压缩包从 51MB 降到 40MB。
+>
+> 单文件便携版是可选的，觉得大就加 `--skip-portable` / `-SkipPortable`，
+> 发行包能再小约 14MB，功能不受影响。
 
 > **macOS 首次打开提示"无法验证开发者"**：这是未签名应用的正常提示。
 > 右键点图标 → 选「打开」→ 再确认一次即可；或执行
 > `xattr -dr com.apple.quarantine /Applications/BIT-Course-Helper.app`。
 >
 > **Windows SmartScreen 拦截**：点「更多信息」→「仍要运行」。
+
+### 无控制台打包：一个容易踩的坑
+
+开发这个项目时踩过一次，记在这里免得重蹈覆辙。
+
+Windows 的 PE 文件只能有一个子系统，所以图形界面版打包时设 `console=False`
+（双击不弹黑框）。代价是**这个程序没有控制台**，`sys.stdout` / `sys.stderr`
+就是 `None`，任何 `sys.stdout.isatty()` 之类的调用都会直接抛
+`AttributeError: 'NoneType' object has no attribute 'isatty'`。
+
+问题在于这个错误**不会在启动时暴露**。`gui.py` 只在真正需要时才
+`from .cli import _build_http` —— 校验登录态、环境自检、开始抢课这几条路径。
+于是症状变成"软件能正常打开，一失效就崩"。
+
+有两个因素让它在开发机上极难复现：
+
+1. **只有 windowed 打包才复现**。从终端启动 exe 时子进程会继承控制台句柄，
+   `stdout` 不为 `None`，所以开发时怎么点都是好的。
+2. **会被 `NO_COLOR` 掩盖**。颜色探测的第一行就是 `if os.environ.get("NO_COLOR")`，
+   只要这个变量存在就提前返回，根本走不到 `isatty()`。
+
+所以代码里做了这些约束：
+
+- 所有流的读取必须走 `cli._stdout()` / `cli._stderr()`，它们在无控制台时返回 `None`；
+- 所有输出走 `cli._echo()`，没有控制台就静默丢弃；
+- `tests/test_windowed_streams.py` 在**子进程**里把两个流置为 `None` 并显式
+  `pop` 掉 `NO_COLOR` 来还原用户环境 —— 子进程是必须的，因为 `Style.enabled`
+  在导入时求值一次，同进程内改 `sys.stdout` 抓不到那个时刻；
+- 还有一条静态检查，禁止源码里再出现未判空的 `sys.stdout.<attr>`。
+
+同一类"macOS 开发、Windows 使用"的盲区还导致了另一个崩溃：会话文件和配置文件
+不是合法 UTF-8 时（Windows 记事本很容易存成 GBK），`read_text` 抛的是
+`UnicodeDecodeError`，而它**不是** `json.JSONDecodeError` 的子类，
+原来的 `except` 抓不到。现在统一捕获 `ValueError` 并给出可操作的提示。
 
 ### 方式二：从源码安装
 
@@ -797,6 +841,22 @@ bitxk grab --browser "/path/to/chrome"       # 单次指定
 bitxk grab
 ```
 
+### 提示「配置文件不是 UTF-8 编码」
+
+Windows 上用记事本另存为 ANSI(GBK) 就会这样。用 VS Code / Notepad++ 打开，
+另存为 **UTF-8** 即可。会话文件遇到同样的编码问题会自动忽略并重新登录，
+不会崩。
+
+### 报 `'NoneType' object has no attribute 'isatty'`（0.1.0 旧构建）
+
+Windows 图形界面版在**登录态失效**时会崩，报这个错。
+
+原因是图形界面版打包成了「无控制台」程序，此时 `sys.stdout` 是 `None`，
+而校验登录态的代码路径会顺带用到命令行模块，那里直接调了 `sys.stdout.isatty()`。
+
+**已修复**，请重新下载 2026-09-17 及之后的构建。详见
+[无控制台打包](#无控制台打包一个容易踩的坑)。
+
 ### 抢到课后浏览器 profile 想清掉
 
 浏览器登录的痕迹都在 `~/.bitxk/`：
@@ -891,8 +951,10 @@ packaging/
 ├── installer.iss       Inno Setup 安装包脚本
 └── config.example.toml 发行包里的配置模板
 
-tests/                372 个测试；网络与浏览器默认全部打桩，
-                      另有 3 项真实启动浏览器的用例（无浏览器时自动跳过）
+tests/                452 个测试；网络与浏览器默认全部打桩，
+                      另有 3 项真实启动浏览器的用例（无浏览器时自动跳过）。
+                      test_windowed_streams.py 专门还原「双击无控制台的 exe」
+                      这一真实场景（见「无控制台打包」一节）
 ```
 
 ---
