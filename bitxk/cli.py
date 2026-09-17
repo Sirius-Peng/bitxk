@@ -19,6 +19,7 @@ import sys
 import time
 from getpass import getpass as _getpass
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .auth import API_BASE, CAS_LOGIN_URL, BitAuth, Session
@@ -53,10 +54,40 @@ _BOLD = "\033[1m"
 _RESET = "\033[0m"
 
 
+def _stdout() -> Any:
+    """取 ``sys.stdout``，无控制台时返回 ``None``。
+
+    PyInstaller 用 ``console=False`` 打包出来的是**没有控制台**的程序，此时
+    ``sys.stdout`` / ``sys.stderr`` 就是 ``None``。GUI 版正是这么打的，而
+    ``bitxk.gui`` 里有多处 ``from .cli import _build_http`` —— 那会让本模块被
+    导入，于是模块级求值的 ``Style.enabled`` 就会去碰 ``sys.stdout``。
+
+    只要有一处忘了判空，用户在「登录态失效」时就会撞见
+    ``'NoneType' object has no attribute 'isatty'``。所以所有流的访问都必须
+    经过这两个函数，不要再直接写 ``sys.stdout``。
+    """
+    return getattr(sys, "stdout", None)
+
+
+def _stderr() -> Any:
+    """取 ``sys.stderr``，无控制台时返回 ``None``。理由见 :func:`_stdout`。"""
+    return getattr(sys, "stderr", None)
+
+
 def _supports_color() -> bool:
     if os.environ.get("NO_COLOR"):
         return False
-    return sys.stdout.isatty()
+    stream = _stdout()
+    if stream is None:
+        return False
+    isatty = getattr(stream, "isatty", None)
+    if isatty is None:
+        return False
+    try:
+        return bool(isatty())
+    except (ValueError, OSError):
+        # 流已经关了（打包后偶发），当作不支持
+        return False
 
 
 class Style:
@@ -109,12 +140,15 @@ def _prepare_console() -> tuple[str, str, str]:
             ctypes.windll.kernel32.SetConsoleCP(65001)
 
     # 2) 再让 Python 的 stdout 用 UTF-8（打包后 PYTHONIOENCODING 未必生效）
-    for stream in (sys.stdout, sys.stderr):
+    for stream in (_stdout(), _stderr()):
+        if stream is None:
+            continue
         with contextlib.suppress(Exception):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     # 3) 实际试一下能不能编码，不能就用 ASCII 兜底
-    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    stream = _stdout()
+    encoding = getattr(stream, "encoding", None) or "utf-8"
     try:
         "✓✗!→".encode(encoding)
     except (UnicodeEncodeError, LookupError):
@@ -168,7 +202,7 @@ def _ascii_fallback(text: str) -> str:
     out = text
     for fancy, plain in _ASCII_FALLBACK.items():
         out = out.replace(fancy, plain)
-    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    encoding = getattr(_stdout(), "encoding", None) or "utf-8"
     return out.encode(encoding, errors="replace").decode(encoding, errors="replace")
 
 
@@ -193,7 +227,7 @@ def _safe(text: object) -> str:
     比在每个 print 上加 try 更可靠。
     """
     s = str(text)
-    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    encoding = getattr(_stdout(), "encoding", None) or "utf-8"
     try:
         s.encode(encoding)
         return s
@@ -213,8 +247,25 @@ def _stamp() -> str:
     return time.strftime("%H:%M:%S")
 
 
+def _echo(text: str, *, err: bool = False) -> None:
+    """往控制台写一行；没有控制台就安静地丢掉。
+
+    GUI 版是无控制台打包的（``sys.stdout is None``），但它会经
+    ``from .cli import _build_http`` 用到本模块里的函数。只要这些函数顺手
+    打印点什么，用户就会看到莫名的崩溃。所以统一从这里出口。
+
+    注意这里用的是**查询每个调用点**而不是模块导入时缓存：测试和某些打包
+    场景会在导入之后替换 ``sys.stdout``。
+    """
+    stream = _stderr() if err else _stdout()
+    if stream is None:
+        return
+    with contextlib.suppress(Exception):
+        print(_safe(text), file=stream, flush=True)
+
+
 def log(message: str) -> None:
-    print(_safe(f"{Style.dim(_stamp())} {message}"), flush=True)
+    _echo(f"{Style.dim(_stamp())} {message}")
 
 
 def log_ok(message: str) -> None:
@@ -675,20 +726,20 @@ def cmd_init(args) -> int:
         return 1
     target.write_text(SAMPLE_CONFIG, encoding="utf-8")
     log_ok(f"已生成配置模板：{target}")
-    print()
-    print("接下来：")
-    print(f"  1. 编辑 {target.name}，填入学号密码与想选的课")
-    print("  2. 运行 bitxk check   自检环境")
-    print("  3. 运行 bitxk login   测试登录")
-    print("  4. 运行 bitxk list    查看余量")
-    print("  5. 运行 bitxk grab    开始抢课")
+    _echo("")
+    _echo("接下来：")
+    _echo(f"  1. 编辑 {target.name}，填入学号密码与想选的课")
+    _echo("  2. 运行 bitxk check   自检环境")
+    _echo("  3. 运行 bitxk login   测试登录")
+    _echo("  4. 运行 bitxk list    查看余量")
+    _echo("  5. 运行 bitxk grab    开始抢课")
     return 0
 
 
 def cmd_check(args) -> int:
     """不需要账号的自检：网络可达性 + 登录页结构。"""
-    print(Style.bold("BIT 选课工具 环境自检"))
-    print()
+    _echo(Style.bold("BIT 选课工具 环境自检"))
+    _echo("")
 
     http = HttpClient(min_interval=0.5, timeout=15, max_retries=1)
     ok = True
@@ -728,7 +779,7 @@ def cmd_check(args) -> int:
             log_warn("检测到旧版 CAS 登录页，请加 --encrypt-mode cbc")
         else:
             log_err("登录页结构已变更，自动登录可能失效")
-            print("     兜底方案：在浏览器里登录后，用 --cookie 与 --token 手动导入。")
+            _echo("     兜底方案：在浏览器里登录后，用 --cookie 与 --token 手动导入。")
             ok = False
 
         # 4. 加密依赖
@@ -750,11 +801,11 @@ def cmd_check(args) -> int:
     finally:
         http.close()
 
-    print()
+    _echo("")
     if ok:
-        print(Style.green("自检通过，可以继续使用。"))
+        _echo(Style.green("自检通过，可以继续使用。"))
         return 0
-    print(Style.yellow("自检发现问题，请按上面的提示处理。"))
+    _echo(Style.yellow("自检发现问题，请按上面的提示处理。"))
     return 1
 
 
@@ -765,11 +816,11 @@ def cmd_gui(args) -> int:
     except ImportError as exc:
         # 精简版发行包不带 tkinter，这里要给出人话提示而不是崩栈
         log_err(f"这个版本没有图形界面支持（{exc}）。")
-        print()
-        print("请改用命令行：")
-        print("  bitxk browser-login   用浏览器登录")
-        print("  bitxk list            查看余量")
-        print("  bitxk grab            开始抢课")
+        _echo("")
+        _echo("请改用命令行：")
+        _echo("  bitxk browser-login   用浏览器登录")
+        _echo("  bitxk list            查看余量")
+        _echo("  bitxk grab            开始抢课")
         return 4
 
     log("正在启动图形界面…（关闭窗口即退出）")
@@ -780,25 +831,25 @@ def cmd_list_browsers(args) -> int:
     """列出本机可用的 Chromium 系浏览器。"""
     from .browser import default_profile_dir, detect_browsers
 
-    print(Style.bold("本机检测到的 Chromium 系浏览器"))
-    print()
+    _echo(Style.bold("本机检测到的 Chromium 系浏览器"))
+    _echo("")
     browsers = detect_browsers(getattr(args, "browser", None) or None)
     if not browsers:
         log_err("没有找到任何 Chromium 系浏览器。")
-        print()
-        print("解决方式（任选其一）：")
-        print("  1. 安装 Google Chrome / Microsoft Edge / Chromium")
-        print("  2. 设置环境变量 BITXK_BROWSER 指向浏览器可执行文件")
-        print("  3. 用 --browser <路径> 手工指定")
+        _echo("")
+        _echo("解决方式（任选其一）：")
+        _echo("  1. 安装 Google Chrome / Microsoft Edge / Chromium")
+        _echo("  2. 设置环境变量 BITXK_BROWSER 指向浏览器可执行文件")
+        _echo("  3. 用 --browser <路径> 手工指定")
         return 1
 
     for index, item in enumerate(browsers):
         mark = Style.green("  ← 默认使用") if index == 0 else ""
-        print(f"  {index + 1}. {item.name}  {Style.dim('[' + item.source + ']')}{mark}")
-        print(f"     {Style.dim(str(item.path))}")
-    print()
-    print(f"浏览器登录会使用的 profile 目录：{Style.dim(str(default_profile_dir()))}")
-    print("（该目录用于记住登录态，删掉它即等于退出登录）")
+        _echo(f"  {index + 1}. {item.name}  {Style.dim('[' + item.source + ']')}{mark}")
+        _echo(f"     {Style.dim(str(item.path))}")
+    _echo("")
+    _echo(f"浏览器登录会使用的 profile 目录：{Style.dim(str(default_profile_dir()))}")
+    _echo("（该目录用于记住登录态，删掉它即等于退出登录）")
     return 0
 
 
@@ -859,9 +910,9 @@ def cmd_list(args) -> int:
         log_ok(f"当前批次：{batch}")
         student_code = session.student_code or cfg.username
 
-        print()
-        print(Style.bold(f"{'课程':<20} {'教学班':<12} {'教师':<10} {'容量':<16} 状态"))
-        print(Style.dim("─" * 78))
+        _echo("")
+        _echo(Style.bold(f"{'课程':<20} {'教学班':<12} {'教师':<10} {'容量':<16} 状态"))
+        _echo(Style.dim("─" * 78))
         for target in cfg.enabled_courses:
             try:
                 classes = client.find_teaching_classes(
@@ -875,7 +926,7 @@ def cmd_list(args) -> int:
                 continue
             classes = [tc for tc in classes if target.matches(tc)]
             if not classes:
-                print(f"{target.name:<20} {Style.dim('未找到匹配的教学班')}")
+                _echo(f"{target.name:<20} {Style.dim('未找到匹配的教学班')}")
                 continue
             for tc in classes:
                 color = {
@@ -884,7 +935,7 @@ def cmd_list(args) -> int:
                     CourseStatus.SELECTED: Style.cyan,
                     CourseStatus.CONFLICT: Style.yellow,
                 }.get(tc.status, str)
-                print(
+                _echo(
                     f"{target.name:<20} {tc.teaching_class_id:<12} "
                     f"{(tc.teacher or '-'):<10} {tc.capacity_text:<16} "
                     f"{color(tc.status.label)}"
@@ -955,7 +1006,7 @@ def cmd_grab(args) -> int:
         import signal
 
         def _on_sigint(_sig, _frame):
-            print()
+            _echo("")
             log_warn("收到中断信号，正在停止…")
             poller.stop()
 
@@ -964,9 +1015,9 @@ def cmd_grab(args) -> int:
             signal.signal(signal.SIGINT, _on_sigint)
 
         stats = poller.run()
-        print()
-        print(Style.bold("运行统计"))
-        print(f"  {stats.summary()}")
+        _echo("")
+        _echo(Style.bold("运行统计"))
+        _echo(f"  {stats.summary()}")
         if not poller.started:
             return 5
         return 0 if stats.successes > 0 or args.dry_run else 1
@@ -976,12 +1027,12 @@ def cmd_grab(args) -> int:
         return 2
     except LoginError as exc:
         log_err(f"登录失败：{exc}")
-        print()
-        print("排查建议：")
-        print("  1. 确认学号密码正确（可先在浏览器登录一次验证）")
-        print("  2. 若浏览器能登而脚本不能，试 --encrypt-mode cbc")
-        print("  3. 仍不行就用兜底方案：浏览器 F12 复制 Cookie 与 Token，")
-        print("     然后运行 bitxk grab --cookie '...' --token '...'")
+        _echo("")
+        _echo("排查建议：")
+        _echo("  1. 确认学号密码正确（可先在浏览器登录一次验证）")
+        _echo("  2. 若浏览器能登而脚本不能，试 --encrypt-mode cbc")
+        _echo("  3. 仍不行就用兜底方案：浏览器 F12 复制 Cookie 与 Token，")
+        _echo("     然后运行 bitxk grab --cookie '...' --token '...'")
         return 2
     except NotInBatchError as exc:
         log_err(str(exc))
@@ -1013,11 +1064,11 @@ def _make_renderer(notifier: Notify, *, dry_run: bool = False):
             log_ok(f"登录成功：{name}（{payload.get('code')}）")
         elif event == "batch":
             log_ok(f"当前可选批次：{payload.get('batch')}")
-            print()
+            _echo("")
         elif event == "start":
             n = payload.get("courses", 0)
             log(f"开始轮询 {n} 门课程。按 Ctrl+C 可随时停止。")
-            print()
+            _echo("")
         elif event == "status":
             _render_status(payload)
         elif event == "attempt":
@@ -1029,14 +1080,14 @@ def _make_renderer(notifier: Notify, *, dry_run: bool = False):
             )
         elif event == "success":
             notifier.success(str(payload.get("course")), str(payload.get("message", "")))
-            print()
+            _echo("")
             log_ok(
                 Style.bold(
                     f"选课成功：{payload.get('course')} "
                     f"（教学班 {payload.get('class_id')} {payload.get('teacher') or ''}）"
                 )
             )
-            print()
+            _echo("")
         elif event == "already":
             log_ok(f"已经选过这门课：{payload.get('course')}")
         elif event == "conflict":
@@ -1148,7 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
         log_err(str(exc))
         return 4
     except KeyboardInterrupt:
-        print()
+        _echo("")
         log_warn("已中断。")
         return 130
     except BitxkError as exc:

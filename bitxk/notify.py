@@ -18,11 +18,16 @@ __all__ = ["bell", "notify", "Notify"]
 
 
 def bell(times: int = 3) -> None:
-    """终端响铃。"""
+    """终端响铃。没有控制台时静默跳过（GUI 版就是这种情况）。"""
+    # 注意不要直接写 sys.stdout：PyInstaller 的 windowed 打包下它是 None，
+    # 而 GUI 版抢课成功时会走到这里。
+    stream = getattr(sys, "stdout", None)
+    if stream is None:
+        return
     try:
         for _ in range(max(1, times)):
-            sys.stdout.write("\a")
-        sys.stdout.flush()
+            stream.write("\a")
+        stream.flush()
     except Exception:  # pragma: no cover
         pass
 
