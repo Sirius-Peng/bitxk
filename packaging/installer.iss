@@ -69,10 +69,11 @@ Name: "addtopath"; Description: "把命令行工具加入 PATH（方便在终端
 [Files]
 ; SourceDir 指向发行暂存目录，其结构为：
 ;   bitxk-gui.exe / bitxk.exe / _internal\ / README.md / LICENSE
-;   / config.example.toml / QUICKSTART.txt / BIT-Course-Helper-cli\
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "BIT-Course-Helper-cli"
-; 精简命令行版单独放进 cli 子目录，方便加到 PATH
-Source: "{#SourceDir}\BIT-Course-Helper-cli\*"; DestDir: "{app}\cli"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+;   / config.example.toml / QUICKSTART.txt / portable\
+; bitxk-gui.exe 与 bitxk.exe 共用同一份 _internal\，只占一份体积。
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "portable"
+; 单文件便携版是可选的额外产物，装进 portable 子目录，没有就跳过
+Source: "{#SourceDir}\portable\*"; DestDir: "{app}\portable"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
@@ -82,9 +83,9 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 Filename: "{app}\{#AppExeName}"; Description: "立即启动 {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [Registry]
-; 可选：把命令行工具的目录写进用户 PATH
+; 可选：把命令行工具所在目录写进用户 PATH（bitxk.exe 就在 {app} 下）
 Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "Path"; \
-    ValueData: "{app}\cli"; Flags: uninsdeletevalue; Tasks: addtopath
+    ValueData: "{app}"; Flags: uninsdeletevalue; Tasks: addtopath
 
 [UninstallDelete]
 ; 只清理我们自己生成的运行产物，不碰用户的配置

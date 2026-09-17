@@ -534,20 +534,33 @@ python -m bitxk --help
 
 ### 方式三：自己打包
 
+一条命令走完全流程（建虚拟环境 → 装依赖 → 打包全部产物 → 生成压缩包与校验和）：
+
+```bash
+# macOS / Linux —— 产物在 dist-release/
+bash packaging/build-release.sh
+
+# Windows —— 产物在 dist-release/
+powershell -ExecutionPolicy Bypass -File packaging\build-release.ps1
+```
+
+Windows 上也可以直接右键 `packaging/build-release.ps1` → 「使用 PowerShell 运行」。
+
+脚本会自动处理几件容易踩坑的事：缺少根证书导致的 pip SSL 报错、上次半途失败的
+虚拟环境、Inno Setup 是否安装、以及发行包里不该出现的配置文件。
+详见 [`packaging/README.md`](packaging/README.md)。
+
+只想单独打某个产物，也可以直接用 PyInstaller：
+
 ```bash
 pip install pyinstaller
 
-# 完整版（图形界面 + 命令行）
-pyinstaller --clean --noconfirm packaging/bitxk.spec
+pyinstaller --clean --noconfirm packaging/bitxk.spec        # 完整版（GUI + 命令行）
+pyinstaller --clean --noconfirm packaging/bitxk-cli.spec    # 精简命令行版（去掉 tkinter）
+pyinstaller --clean --noconfirm packaging/bitxk-onefile.spec # 单文件版（两个 exe）
 
-# 精简命令行版（去掉 tkinter，小约 10MB）
-pyinstaller --clean --noconfirm packaging/bitxk-cli.spec
-
-# 产物都在 dist/ 下
+# 产物在 dist/ 下
 ```
-
-Windows 上还可以直接右键运行 `packaging/build-windows.ps1`，
-它会自动建虚拟环境、装依赖、打包并打成 zip。
 
 ## 快速开始
 
@@ -868,10 +881,14 @@ bitxk/
 └── exceptions.py     分层异常
 
 packaging/
+├── README.md           打包说明（怎么编、产物是什么、怎么排错）
+├── build-release.sh    macOS / Linux 一键打包
+├── build-release.ps1   Windows 一键打包
 ├── entry.py            打包入口：无参数开 GUI，带参数走 CLI
 ├── bitxk.spec          完整版打包配置
 ├── bitxk-cli.spec      精简命令行版打包配置
-├── build-windows.ps1   Windows 一键构建脚本
+├── bitxk-onefile.spec  单文件便携版打包配置
+├── installer.iss       Inno Setup 安装包脚本
 └── config.example.toml 发行包里的配置模板
 
 tests/                372 个测试；网络与浏览器默认全部打桩，
